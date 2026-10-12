@@ -54,7 +54,7 @@ BASE = f"http://{HOST}:{SERVER.server_port}"
 threading.Thread(target=SERVER.serve_forever, daemon=True).start()
 
 
-def seed(policy="destination", override="inherit", enabled=True, legacy=False):
+def seed(policy="destination", override="inherit", enabled=True, legacy=False, port=None):
     sv.setup(spaces=True)
     work = str(uuid.uuid4()).upper()
     Path(sv.SUPPORT).mkdir(parents=True, exist_ok=True)
@@ -64,6 +64,8 @@ def seed(policy="destination", override="inherit", enabled=True, legacy=False):
     ]))
     rule = {"id": str(uuid.uuid4()), "domain": HOST,
             "spaceID": work, "spaceName": "Work", "enabled": enabled}
+    if port is not None:
+        rule["port"] = port
     config = {"enabled": True, "rules": [rule]}
     if not legacy:
         config["internalPolicy"] = policy
@@ -100,8 +102,8 @@ def destination_requests():
 
 
 def case(t, name, policy="destination", override="inherit", enabled=True,
-         legacy=False, action="field", routed=True):
-    source = seed(policy, override, enabled, legacy)
+         legacy=False, action="field", routed=True, port=None):
+    source = seed(policy, override, enabled, legacy, port)
     if action == "private":
         source = sv.cmd({"do": "open", "url": BASE + "/source", "private": True})["id"]
         time.sleep(0.8)
@@ -114,6 +116,8 @@ def case(t, name, policy="destination", override="inherit", enabled=True,
         sv.cmd({"do": "field", "text": f"http://127.0.0.1:{SERVER.server_port}/redirect", "go": True})
     elif action == "post":
         sv.cmd({"do": "tap", "id": source, "selector": "#post"})
+    elif action == "external":
+        sv.cmd({"do": "windows", "action": "link", "url": BASE + "/destination"})
     elif action == "field":
         sv.cmd({"do": "field", "text": BASE + "/destination", "go": True})
     elif action == "middle":
@@ -145,11 +149,23 @@ def case(t, name, policy="destination", override="inherit", enabled=True,
 
 
 def main():
+    global HOST, BASE
     addresses = {result[4][0] for result in socket.getaddrinfo(HOST, SERVER.server_port)}
     if addresses != {"127.0.0.1"}:
         raise RuntimeError(f"fixture host must resolve only to loopback: {addresses}")
     t = sv.T()
     try:
+        original_host, original_base = HOST, BASE
+        HOST = "localhost"
+        BASE = f"http://{HOST}:{SERVER.server_port}"
+        case(t, "localhost exact port", port=SERVER.server_port)
+        case(t, "localhost external exact port", action="external", port=SERVER.server_port)
+        case(t, "localhost other port excluded", port=SERVER.server_port % 65535 + 1, routed=False)
+        case(t, "localhost all ports")
+        HOST = "127.0.0.1"
+        BASE = f"http://{HOST}:{SERVER.server_port}"
+        case(t, "loopback exact port", port=SERVER.server_port)
+        HOST, BASE = original_host, original_base
         for action in ["field", "same", "cmd", "blank", "middle"]:
             case(t, "automatic " + action, action=action)
         case(t, "current override", override="current", routed=False)
