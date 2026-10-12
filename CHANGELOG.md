@@ -13,7 +13,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
-- Route links from other apps to a space by domain, including subdomains; off until enabled in Settings › Routing, with no rules added by default.
+- Route links by domain, including subdomains; external links use the rule destination. Links opened inside Search stay in the current Space by default, with global and per-domain choices to ask or open a new tab in the destination Space. Off until enabled in Settings › Routing, with no rules added by default.
 
 - Arc's pinned list comes in with the shape Arc gave it, when Pinned rows is on: a page Arc keeps loose becomes a row under the pins, a page it filed in a folder stays a tab in a group of that name, and the sheet says so before you bring anything over. A pin is never in a group, so filing the folder's pages as rows would have been the folder's name thrown away; with Pinned rows off, the sheet offers to turn them on right there, beside Arc's line, and without them the whole list comes in as tabs, as before. Thanks [@Chahine-tech](https://github.com/Chahine-tech) ([#582](https://github.com/driceroland/Search/pull/582), [#478](https://github.com/driceroland/Search/issues/478))
 - Close Group, in a tab group's menu, closes the group and every tab in it. One ⇧⌘T brings it all back, every tab in its place and the group named as it was, however many tabs it held. Asked for by email; thanks [@oddharsh](https://github.com/oddharsh) for bringing it back whole ([#473](https://github.com/driceroland/Search/pull/473))
