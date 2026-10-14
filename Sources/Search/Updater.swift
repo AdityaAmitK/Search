@@ -201,7 +201,7 @@ final class Updater: ObservableObject {
             case .waiting(let known) where known == found: break
             case .none, .offered, .waiting:
                 stage = .waiting(found)
-                say?("Search \(found.version) is out — choose Install Update in the Search menu")
+                say?("Search \(found.version) is out — rebuild with search-routing/update.py")
             }
         }
     }
@@ -246,22 +246,9 @@ final class Updater: ObservableObject {
     /// the bundle this process is running from out from under it, so the
     /// next launch takes the next one.
     private func take(_ release: Release) {
-        switch stage {
-        case .fetching, .ready: return
-        case .none, .offered, .waiting: break
-        }
-        stage = .fetching(release)
-        say?("Search \(release.version) is downloading…")
-        Task.detached(priority: .utility) {
-            let worked: Bool
-            do {
-                try await Swap.install(release)
-                worked = true
-            } catch {
-                worked = false
-            }
-            await MainActor.run { [weak self] in self?.landed(release, worked: worked) }
-        }
+        // A stock update would remove the local external-link routing patch.
+        stage = .waiting(release)
+        say?("Search update available — rebuild with search-routing/update.py")
     }
 
     private func landed(_ release: Release, worked: Bool) {

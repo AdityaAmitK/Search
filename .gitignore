@@ -13,3 +13,7 @@ __pycache__/
 *.provisionprofile
 *.p12
 *.mobileprovision
+
+# Local routing builds and private installation backups (may be a symlink).
+.state
+search-routing-probe.log
