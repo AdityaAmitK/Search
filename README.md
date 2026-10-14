@@ -1,125 +1,54 @@
-# Search
+# Search Routing
 
-A small, fast, quiet web browser for the Mac, by [Office Commun](https://officecommun.com).
+A fork of [Search by Office Commun](https://github.com/driceroland/Search), currently based on **v1.0.5**, with configurable URL routing between Spaces. The application still appears as **Search** on macOS.
 
-![Search, with its tabs down the left and a page taking the rest of the window](.github/screenshot.png)
+Routing lives directly in this fork's Swift source on the `routing` branch. There is no separate patch to apply. The related upstream [feature request #595](https://github.com/driceroland/Search/issues/595) and [PR #596](https://github.com/driceroland/Search/pull/596) remain references for the original proposal.
 
-**[Download for macOS →](https://officecommun.com/search)** · macOS 14 or later · free · about 6 MB
+## Routing
 
-Or with [Homebrew](https://brew.sh): `brew install --cask driceroland/tap/search`
+Enable Spaces, then configure routing in Settings. Rules match a host and its subdomains; a more specific host wins. For example, route `github.com` to Work and `gist.github.com` to Research. Host matching ignores case and a trailing dot, and never matches an unrelated host containing the same text. Destination Spaces are stored by identity, so renaming a Space preserves its rules.
 
----
+A blank port matches **all ports**. Set a port to narrow a rule, including a local development address such as `localhost` on port `3000`. `localhost`, `127.0.0.1`, and `::1` are supported as exact local hosts; enter the port separately. Explicit port rules also match the scheme's default port when omitted from a URL.
 
-## What it is
+External links use the matched destination Space. For links followed inside Search, choose a global policy: stay in the current Space, ask where to open, or open in the destination Space. Each rule can inherit that policy or override it. Ask lets you choose the current Space or any available Space before opening. This applies to user navigation; embedded resources and background requests do not switch Spaces.
 
-Search is a browser with nothing in the way. A row of tabs — across the top or down the left, your choice — and the page. There is no toolbar, no start page, no sidebar of suggestions, no account to sign into, nothing that wants your attention. You type an address or a few words in one field and you are on the page.
+Initial rules send social/video hosts to Personal and development/work hosts to Work when those Spaces exist. Rules can be edited, disabled, or deleted, and an empty list stays empty. Unmatched links retain Search's normal behavior.
 
-It uses **WebKit**, the engine already inside every Mac (it is what Safari runs on). That is why the whole app is about 3 MB on disk and opens instantly: there is no second copy of Chromium to download, update and keep in memory.
+## Build and validate
 
-It was built by a design studio that spends its whole day in a browser and was tired of the ones that had become products. This one is a tool.
+Requires macOS 14 or later, Python 3, Git, and the Xcode tools needed by upstream Search. Clone this fork's maintained branch:
 
-## What it does
-
-- **One field.** Type an address and you go there; type words and you search. It finishes addresses from your own history and never sends what you type anywhere until you press Return.
-- **Tabs that stay out of the way.** Pin the pages you keep open all day and they shrink to a letter or their icon. Tabs from your last session come back instantly and cost nothing until you click them. `⌘K` lists your open tabs by name.
-- **Two pages side by side.** Turn on Split View in Settings › Tabs, then drag a tab onto a page or choose Tabs › Split Current Page. Drag the divider to resize the panes; the outlined pane receives page commands. Pairs and their widths come back with their Space, including after a restart.
-- **Reading mode.** `⇧⌘R` strips a page down to the article.
-- **Hide anything, for good.** `⇧⌘H`, then click a cookie banner, a newsletter overlay, a rail of "related" nonsense — it goes, and it is still gone on that site next time, before the page has drawn a single frame.
-- **An ad blocker that runs before the page.** Third-party trackers and ad networks are stopped at the network level, so there is nothing to render and nothing to slow down. On by default, off per site if something breaks.
-- **Video that follows you.** `⇧⌘P` lifts the video out of the page into a small window that stays above everything, including other apps.
-- **Passwords, in your keychain.** Search offers to save a sign-in once it has actually worked, and offers your saved accounts, and the Mac's passkeys for the site, under the field when you click it — the way Safari does, never filling anything on its own. Everything lives in the macOS keychain, encrypted by the system, readable only by Search. Bring yours in from Chrome, Arc, Dia, Brave or Edge in one click; nothing leaves the Mac.
-- **Light, dark, or the Mac's own.** The frame and the pages follow.
-- **Bookmarks, history, downloads** — each a panel, each searchable, each one keystroke away.
-- **Chrome extensions, without Chrome.** Paste a Chrome Web Store link in Settings › Extensions, or open the extension's page in Search and press Add. It runs on WebKit's own extension engine — the one Safari uses — and where Chrome has APIs WebKit doesn't (bookmarks, history, downloads, side panel, offscreen documents, fonts, notifications, speech, OAuth sign-in), Search fills them in itself. They live behind the puzzle button; pin the ones you use often. Building your own? Load its folder as an unpacked extension and press Reload after each change, as in Chrome's developer mode. macOS 15.4 or later.
-- **Updates itself, quietly.** Once a day it checks for a newer build, downloads it, verifies it is signed by Office Commun, and swaps it in for the next launch. Nothing restarts on its own.
-
-## What it doesn't do
-
-On purpose:
-
-- No extension you have to install to feel at home. Blocking ads, hiding clutter, reading mode, picture-in-picture and passwords are built in; extensions are there for everything else.
-- No sync, no account, no cloud. Your tabs, history and passwords are on your Mac and nowhere else.
-- No telemetry, no analytics, no crash reports sent anywhere. The only things that leave your Mac are the pages you ask for, their icons, and one small request a day to see whether there is a newer version.
-- One window. Tabs are the only kind of "new" there is.
-
-## Privacy, concretely
-
-| What | Where it is | Who can read it |
-|---|---|---|
-| Passwords | The macOS login keychain, as ordinary keychain items tagged `Search` | Search, signed by Office Commun. Any other app triggers the system's permission dialog. |
-| History, bookmarks, open tabs, hidden elements | Small JSON files in `~/Library/Application Support/Search/` | You. |
-| Cookies and site data | WebKit's own store for the app | The sites that set them, as in any browser. |
-| Extensions | Unpacked in `~/Library/Application Support/Search/Extensions/`, their data in WebKit's extension store | Each extension, within the permissions you accepted when adding it. |
-| Anything else | Nowhere. There is no server. | — |
-
-A **private tab** (`⇧⌘N`) has its own cookie jar and leaves nothing behind when it closes.
-
-Apps you allow in System Settings › Privacy & Security › Automation can read the address and title of your tabs with AppleScript; private tabs are never shown.
-
-## Keyboard
-
-| | |
-|---|---|
-| `⌘L` address · `⌘K` switch tab · `⌘T` new tab · `⌘W` close · `⇧⌘T` reopen | `⌘[` `⌘]` back, forward · `⇧⌘[` `⇧⌘]` previous, next tab · `⌘1`–`⌘9` jump |
-| `⇧⌘S` tabs across the top or down the left · `⌘S` fold the sidebar away · `⇧⌘B` bookmark this page | `⇧⌘R` reading mode · `⇧⌘P` float the video · `⇧⌘H` hide something · `⇧⌘U` what is hidden here |
-| `⌘F` find · `⌘D` duplicate tab · `⇧⌘C` copy address · `⇧⌘V` paste and go | `⌘Y` history · `⇧⌘J` downloads · `⌘,` settings · `⌥⌘L` passwords |
-
-`⌘R` reloads the page; `⌥⌘R` reloads it from origin, checking everything cached with the site again, as Safari's Reload Page From Origin.
-
-`⌃Tab` and `⌃⇧Tab` walk along the row of tabs; `Tab` stays the page's, for moving through a form. `esc` puts away whatever is open.
-
-With Split View on, `⌥⌘N` splits the current page and `⌃⌘←` / `⌃⌘→` go from one page to the other. `⌘W` closes the focused tab and gives the remaining page the whole area. Tabs › Separate Split Tabs keeps both tabs open separately.
-
----
-
-## For developers
-
-### Why the source is here
-
-So anyone can read exactly what a browser handling their passwords and history is doing, build it themselves, or fix something that bothers them. The code is small enough to actually read — about 42,000 lines of Swift, no dependencies beyond what Apple ships with macOS, one file per concern.
-
-### Building it
-
-- macOS 14 or later, Xcode 16 / Swift 6 toolchain
-- `swift build` — runs the app straight from the SwiftPM binary
-- `./build.sh` — assembles a real, double-clickable `Search.app` in `build/`, ad-hoc signed so it runs on your own Mac
-
-A build you make yourself won't be notarized or carry Office Commun's Developer ID, so the first launch needs a right-click → Open (or an allow in System Settings → Privacy & Security). That's expected — it's the same thing that happens with any app that isn't from the App Store or a notarized DMG. Your own build also keeps its passwords apart from a signed Search's: the keychain tells the two apart by their signatures.
-
-`./build.sh release dmg` also makes `Search.dmg` / `Search.zip`. `./build.sh release ship` additionally notarizes and staples — that step needs a Developer ID certificate and Apple credentials, so it only really does anything for Office Commun's own releases.
-
-### How it's put together
-
-- **SwiftUI** for everything drawn, **AppKit** for the handful of things SwiftUI doesn't reach on macOS (the window's title bar, dragging the window by an empty part of the tab row), **WKWebView** for pages.
-- One `Tab` per page. Its web view is built lazily — a tab restored from last session doesn't cost a process until you switch to it. That's most of why launching with twenty tabs is still instant. Each page runs in WebKit's own content process, as in Safari; a tab you close is really gone.
-- The ad blocker is a `WKContentRuleList` compiled once at launch and enforced inside WebKit's networking, before a request is made — zero cost at run time, unlike a JavaScript blocker.
-- Hidden elements are a per-site list of selectors injected as a stylesheet at document start, so nothing is ever seen appearing and vanishing.
-- Every colour is a light/dark pair in `Design.swift`, resolved by the window's appearance; nothing else in the code knows which mode it is in.
-- Extensions run on `WKWebExtension` (macOS 15.4+). `Crx.swift` fetches an extension from the Chrome Web Store's public update address and checks the CRX3 signature against the extension's id before anything is unpacked. `Extensions.swift` is the browser's side of WebKit's contract — tabs, the window, permissions, popups. `ExtensionShims.swift` adds, at install, a small script to the extension's worker, pages and content scripts: it defines the Chrome APIs WebKit lacks — `userScripts`, `privacy`, `browsingData`, `sessions`, the old FileSystem API and more — as calls answered natively by Search, and mends the places where WebKit behaves differently from Chrome: replies from pages that don't answer, listeners added after a worker starts, workers WebKit loses track of, members and constants it leaves out. Extension pages are served from `chrome-extension://<id>/`, the address they have in Chrome, so servers and sites recognise them. `./bench ext-*` drives all of it from the shell against a test run. `ExtensionNative.swift` speaks Chrome's native messaging to hosts registered in Chrome's `NativeMessagingHosts` folders.
-- `Sources/Search/` is one file per concern: `Vault.swift` is the keychain, `Shield.swift` the ad blocker, `Curtain.swift` the hidden elements, `Session.swift` what comes back at launch, `Updater.swift` the update, `Bench.swift` the test socket, and so on. There's no framework of its own to learn first.
-
-### Testing it without closing it
-
-Turn on **Settings › General › Let a script drive Search** and the running app listens on a Unix socket in its own folder (readable by your user only). `./bench` at the root of the repository speaks it:
-
-```
-./bench open https://example.com     # a tab of its own, at the end of your row, marked with a flask
-./bench wait 2e7e7e89                 # until it has loaded
-./bench text 2e7e7e89                 # the page's text
-./bench shot 2e7e7e89 out.png         # a picture of it
-./bench click 2e7e7e89 "button.go"    # click, type, submit — through the page's own events
-./bench probe                         # the window's state: open panels, a modal, every window
-./bench close all
+```sh
+git clone --branch routing https://github.com/AdityaAmitK/search-routing.git
+cd search-routing
+python3 routing/tests/test_routing.py .
+python3 routing/tests/test_install.py
+bash build.sh
+python3 routing/tests/test_browser.py .
 ```
 
-Bench tabs are never selected for you, never enter the session or the history, and go when the script says so. It is how this browser is tested while somebody is using it.
+The browser test launches an isolated probe profile and removes it afterward. It does not use your normal browser profile. On Intel, the build is at `build/intel/Search.app`; pass `SEARCH_TEST_APP="$PWD/build/intel/Search.app"` to the browser test.
 
-`python3 Tests/split_view.py`, after `./build.sh`, checks Split View through the app's own model in a hidden test run with its own settings and files, all removed afterwards. It never makes or shows a window; what can only be seen (dragging onto a page's edge, the divider under the pointer, the motion) is checked by hand on a release candidate.
+Upstream's build script produces `build/Search.app` on Apple Silicon and `build/intel/Search.app` on Intel. Without a Developer ID certificate it signs locally with an ad-hoc signature. This is not an Office Commun release or a notarized distribution. The bundle keeps Search's identifier and uses the same existing profile; changes in signing identity can cause macOS keychain permission prompts. Passkeys require the appropriate Apple entitlement and provisioning profile, as described in the [upstream documentation](routing/UPSTREAM_README.md).
 
-### Contributing
+## Install or roll back
 
-Issues and pull requests are genuinely welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how this is reviewed and what tends to get merged. The short version: small changes, no new dependencies, nothing that phones home. Found a security problem? Please report it privately, as [SECURITY.md](SECURITY.md) says.
+Quit Search completely first. For an existing `/Applications/Search.app` installation:
 
-### License
+```sh
+python3 install.py --install "$PWD/build/Search.app"
+# Restore the immediately previous installed bundle:
+python3 install.py --rollback
+```
 
-MIT — see [LICENSE](LICENSE). Do what you want with the code. "Search" and the app icon are Office Commun's; please rename a fork before distributing it under another name.
+Use the Intel path above when applicable. The installer verifies the signature and identifier, backs up the original app, support folder, and settings once under `.state/install-backups`, and retains the previous app for rollback. Installation and rollback replace the app bundle while preserving the active browser profile; rollback does not rewind browser data. Keep `.state` private and retain it for recovery. If Search is not installed yet, copy the validated app to `/Applications/Search.app` manually.
+
+## Updates
+
+Run `python3 update.py --check-only` to fetch a fresh checkout of this fork's `routing` branch and run routing policy and installer checks. Run `python3 update.py` to additionally build it, verify its signature, and run browser integration checks. Successful builds include `search-routing-build.json` beside the app, recording the source, branch, revision, version, and architecture. Checkouts remain in `.state` for review.
+
+The helper does not install the app. Review the result, quit Search, and run the explicit installation command it prints. Fork updates come from the maintained `routing` branch. Upstream releases are incorporated by manually merging the upstream release, reviewing conflicts, and rerunning the checks before publishing the branch. Search still checks for upstream update notifications, but this fork blocks in-app replacement and directs you to rebuild here so routing is retained.
+
+## Credits and license
+
+Search is created by Office Commun and distributed under the [MIT license](LICENSE). This fork preserves that license and upstream attribution. See the [preserved upstream README](routing/UPSTREAM_README.md) for Search's browser features, shortcuts, privacy design, and development documentation. Its download links and stock updater instructions describe the upstream product.
