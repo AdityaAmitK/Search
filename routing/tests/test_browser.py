@@ -41,7 +41,7 @@ def main(scenario='defaults'):
     preferences['routing.probe.launchURLs'] = cold_urls
     settings.write_bytes(plistlib.dumps(preferences))
     subprocess.run(['defaults', 'import', domain, str(settings)], check=True)
-    log_path = checkout / 'search-routing-probe.log'
+    log_path = checkout / 'search-browser-probe.log'
     with log_path.open('w') as log:
         process = subprocess.Popen(['/usr/bin/open', '-n', '-W', '--env',
                                     f'SEARCH_PROBE={world}', '-a', os.environ.get('SEARCH_TEST_APP', str(checkout / 'build/Search.app'))],

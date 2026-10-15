@@ -1,4 +1,4 @@
-# Search Routing
+# Search Browser
 
 A fork of [Search by Office Commun](https://github.com/driceroland/Search), currently based on **v1.0.5**, with configurable URL routing between Spaces. The application still appears as **Search** on macOS.
 
@@ -19,8 +19,8 @@ Initial rules send social/video hosts to Personal and development/work hosts to 
 Requires macOS 14 or later, Python 3, Git, and the Xcode tools needed by upstream Search. Clone this fork's maintained branch:
 
 ```sh
-git clone --branch main https://github.com/AdityaAmitK/search-routing.git
-cd search-routing
+git clone --branch main https://github.com/AdityaAmitK/Search-Browser.git
+cd Search-Browser
 python3 routing/tests/test_routing.py .
 python3 routing/tests/test_install.py
 bash build.sh
@@ -45,7 +45,7 @@ Use the Intel path above when applicable. The installer verifies the signature a
 
 ## Updates
 
-Run `python3 update.py --check-only` to fetch a fresh checkout of this fork's `main` branch and run routing policy and installer checks. Run `python3 update.py` to additionally build it, verify its signature, and run browser integration checks. Successful builds include `search-routing-build.json` beside the app, recording the source, branch, revision, version, and architecture. Checkouts remain in `.state` for review.
+Run `python3 update.py --check-only` to fetch a fresh checkout of this fork's `main` branch and run routing policy and installer checks. Run `python3 update.py` to additionally build it, verify its signature, and run browser integration checks. Successful builds include `search-browser-build.json` beside the app, recording the source, branch, revision, version, and architecture. Checkouts remain in `.state` for review.
 
 The helper does not install the app. Review the result, quit Search, and run the explicit installation command it prints. Fork updates come from the maintained `main` branch. Upstream releases are incorporated by manually merging the upstream release, reviewing conflicts, and rerunning the checks before publishing the branch. Search still checks for upstream update notifications, but this fork blocks in-app replacement and directs you to rebuild here so routing is retained.
 

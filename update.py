@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
-SOURCE = 'https://github.com/AdityaAmitK/search-routing.git'
+SOURCE = 'https://github.com/AdityaAmitK/Search-Browser.git'
 BRANCH = 'main'
 
 
@@ -43,7 +43,7 @@ def main():
     run(sys.executable, 'routing/tests/test_browser.py', '.', cwd=checkout,
         env=dict(env, SEARCH_TEST_APP=str(app)))
     provenance = dict(source=SOURCE, branch=BRANCH, revision=revision, version=version, architecture=arch)
-    (app.parent / 'search-routing-build.json').write_text(json.dumps(provenance, indent=2) + '\n')
+    (app.parent / 'search-browser-build.json').write_text(json.dumps(provenance, indent=2) + '\n')
     print(f'Validated app: {app}\nInstallation is a separate explicit step: python3 install.py --install "{app}"')
 
 

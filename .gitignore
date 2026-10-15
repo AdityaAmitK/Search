@@ -16,4 +16,4 @@ __pycache__/
 
 # Local routing builds and private installation backups (may be a symlink).
 .state
-search-routing-probe.log
+search-browser-probe.log
