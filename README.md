@@ -1,6 +1,6 @@
 # Search Browser
 
-A fork of [Search by Office Commun](https://github.com/driceroland/Search), currently based on **v1.0.5**, with configurable URL routing between Spaces. The application still appears as **Search** on macOS.
+A fork of [Search by Office Commun](https://github.com/driceroland/Search), based on **v1.0.5** plus upstream `main` through `d3acea6` (16 October 2026), with configurable URL routing between Spaces and per-display sidebar placement. The application still appears as **Search** on macOS.
 
 Routing lives directly in this fork's Swift source on the `main` branch. There is no separate patch to apply. The related upstream [feature request #595](https://github.com/driceroland/Search/issues/595) and [PR #596](https://github.com/driceroland/Search/pull/596) remain references for the original proposal.
 
