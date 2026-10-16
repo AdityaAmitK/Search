@@ -12,6 +12,8 @@ struct SettingsPanel: View {
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var shield = Shield.shared
     @State private var isDefault = Links.isDefault
+    /// The displays connected now, for a side chosen on each.
+    @State private var screens = NSScreen.screens
     /// A site shortcut being written, kept out of Preferences until it's saved.
     @State private var draft: Keyword?
     @State private var page: Page = Page(rawValue: Store.settings.string(forKey: "settings.page") ?? "") ?? .general
@@ -399,7 +401,7 @@ struct SettingsPanel: View {
 
     private var tabs: some View {
         Card {
-            Line("Tabs in a sidebar", "Down the \(prefs.sidePosition.rawValue) instead of across the top. Pull its edge to make it wider; double-click the edge to reset.") {
+            Line("Tabs in a sidebar", "Down the \(browser.sidePosition.rawValue) instead of across the top. Pull its edge to make it wider; double-click the edge to reset.") {
                 Switch(on: Binding(
                     get: { prefs.sidebar },
                     set: { on in withAnimation(Motion.glide) { prefs.sidebar = on } }
@@ -407,11 +409,28 @@ struct SettingsPanel: View {
             }
             if prefs.sidebar {
                 Rule()
-                Line("Sidebar position", "Tabs down the \(prefs.sidePosition.rawValue) edge of the window") {
-                    Segmented(options: SidebarPosition.allCases.map { ($0, $0.title) }, selection: $prefs.sidePosition)
+                Line("A side for each display", "Keep the tabs on the edge away from another screen beside this one, where the pointer crosses over") {
+                    Switch(on: $prefs.sidePerDisplay)
                 }
                 Rule()
-                Line("Hide the sidebar until the pointer reaches the edge", "The page takes the whole window; push against its \(prefs.sidePosition.rawValue) edge for the tabs. ⌘S keeps them out.") {
+                if prefs.sidePerDisplay {
+                    ForEach(screens, id: \.self) { screen in
+                        let key = Display.key(screen)
+                        Line(screen.localizedName, key == browser.display ? "This window's display" : nil) {
+                            Segmented(options: SidebarPosition.allCases.map { ($0, $0.title) }, selection: Binding(
+                                get: { prefs.sidePosition(on: key) },
+                                set: { side in if let key { prefs.sideDisplays[key] = side } }
+                            ))
+                        }
+                        Rule()
+                    }
+                } else {
+                    Line("Sidebar position", "Tabs down the \(prefs.sidePosition.rawValue) edge of the window") {
+                        Segmented(options: SidebarPosition.allCases.map { ($0, $0.title) }, selection: $prefs.sidePosition)
+                    }
+                    Rule()
+                }
+                Line("Hide the sidebar until the pointer reaches the edge", "The page takes the whole window; push against its \(browser.sidePosition.rawValue) edge for the tabs. ⌘S keeps them out.") {
                     Switch(on: $prefs.sideHides)
                 }
             }
@@ -461,6 +480,9 @@ struct SettingsPanel: View {
             Line("Split View", "Show two tabs side by side. Drag a tab onto a page to pair them.") {
                 Switch(on: $prefs.splitView)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            screens = NSScreen.screens
         }
     }
 

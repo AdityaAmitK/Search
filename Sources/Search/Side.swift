@@ -34,7 +34,7 @@ struct SideBar: View {
     private static let square: CGFloat = 34
     private static let pinGap: CGFloat = 4
 
-    private var onRight: Bool { prefs.sidePosition == .right }
+    private var onRight: Bool { browser.sidePosition == .right }
     private var innerEdge: Alignment { onRight ? .leading : .trailing }
 
     /// The window's buttons' corner: gone in full screen, where macOS takes

@@ -1508,7 +1508,19 @@ final class Browser: NSObject, ObservableObject {
     var inScene = false
     /// Its window, once it has one.
     weak var window: NSWindow? {
-        didSet { if window != nil { shut = false } }
+        didSet {
+            if window != nil { shut = false }
+            seeDisplay()
+        }
+    }
+    /// The display its window is on (see Display.key), for a column that
+    /// sits on a different side on each.
+    @Published private(set) var display: String?
+    /// Which side the column is on in this window.
+    var sidePosition: SidebarPosition { prefs.sidePosition(on: display) }
+    func seeDisplay() {
+        let key = Display.key(window?.screen)
+        if key != display { display = key }
     }
     /// Its window closed and kept: the last one, closed with the app running.
     var shut = false
@@ -1852,6 +1864,15 @@ final class Browser: NSObject, ObservableObject {
                     tab.arm(hiding: curtain.css(on: curtain.host(of: tab.address)))
                 }
                 announce(on ? "Passkeys offered again — reload the page" : "Sites will ask for a password instead")
+            }
+            .store(in: &bag)
+
+        // A window moved to another display, or the displays rearranged.
+        NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)
+            .merge(with: NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification))
+            .sink { [weak self] note in
+                guard let self, note.object is NSApplication || (note.object as? NSWindow) === window else { return }
+                seeDisplay()
             }
             .store(in: &bag)
 
