@@ -11,6 +11,8 @@ in [ROADMAP.md](ROADMAP.md).
 
 ## Unreleased
 
+- The sidebar can sit on a different side on each display: Settings › Tabs › A side for each display, then Left or Right for every connected screen. A window takes its display's side, and changes over when it is moved to another one — so a laptop beside a monitor can keep the tabs on the edges away from where the pointer crosses between them.
+
 ### Held back
 
 Not in this version, kept on main for a later one:

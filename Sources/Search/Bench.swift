@@ -646,7 +646,7 @@ final class Bench {
                 "modal": NSApp.modalWindow.map { "\(type(of: $0)) “\($0.title)”" } ?? "",
                 "look": browser.prefs.look.rawValue,
                 "sidebar": browser.prefs.sidebar,
-                "sidePosition": browser.prefs.sidePosition.rawValue,
+                "sidePosition": browser.sidePosition.rawValue,
                 "sideWidth": Double(browser.prefs.sideWidth),
                 "appearance": NSApp.appearance?.name.rawValue ?? "system",
                 "key": NSApp.keyWindow.map { "\(type(of: $0)) “\($0.title)”" } ?? "",

@@ -172,7 +172,7 @@ struct Fold: View {
             browser.folded = prefs.sidebar && prefs.sideHides
             browser.peeking = false
         }
-        .onChange(of: prefs.sidePosition) { _, _ in
+        .onChange(of: browser.sidePosition) { _, _ in
             resetPending()
             browser.peeking = false
             if let bar = Fold.titlebar { Fold.reset(bar, hidden: lightsOff) }
@@ -217,7 +217,7 @@ struct Fold: View {
     }
 
     private var onRight: Bool {
-        prefs.sidebar && prefs.sidePosition == .right
+        prefs.sidebar && browser.sidePosition == .right
     }
 
     private func resetPending() {

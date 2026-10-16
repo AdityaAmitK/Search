@@ -37,6 +37,21 @@ enum SidebarPosition: String, CaseIterable, Identifiable {
     }
 }
 
+/// A display told apart from the others, across launches and reconnections.
+enum Display {
+    /// The display's own UUID, which outlasts a reconnection and tells two
+    /// monitors of the same model apart; its name if macOS has none.
+    @MainActor
+    static func key(_ screen: NSScreen?) -> String? {
+        guard let screen else { return nil }
+        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+           let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() {
+            return CFUUIDCreateString(nil, uuid) as String
+        }
+        return screen.localizedName
+    }
+}
+
 @MainActor
 final class Preferences: ObservableObject {
     private let store = Store.settings
@@ -73,6 +88,23 @@ final class Preferences: ObservableObject {
     /// Which side the column is on when it is shown vertically.
     @Published var sidePosition: SidebarPosition {
         didSet { store.set(sidePosition.rawValue, forKey: "sidebar.position") }
+    }
+    /// Each display its own side for the column: a laptop beside a monitor
+    /// can keep the tabs on the edge away from the other screen, where the
+    /// pointer crossing over doesn't find them. Off unless asked for.
+    @Published var sidePerDisplay: Bool {
+        didSet { store.set(sidePerDisplay, forKey: "sidebar.perDisplay") }
+    }
+    /// The side chosen for each display, by its key (see Display.key). A
+    /// display not in here takes `sidePosition`.
+    @Published var sideDisplays: [String: SidebarPosition] {
+        didSet { store.set(sideDisplays.mapValues(\.rawValue), forKey: "sidebar.displays") }
+    }
+
+    /// The side the column is on in a window on this display.
+    func sidePosition(on display: String?) -> SidebarPosition {
+        guard sidePerDisplay, let display else { return sidePosition }
+        return sideDisplays[display] ?? sidePosition
     }
     /// The column folded away whenever the pointer isn't at its edge,
     /// rather than only after ⌘S (see Fold.swift). Off unless asked for.
@@ -378,6 +410,9 @@ final class Preferences: ObservableObject {
         sidebar = store.object(forKey: "sidebar") as? Bool
             ?? (store.string(forKey: "manner") == "side")
         sidePosition = store.string(forKey: "sidebar.position").flatMap(SidebarPosition.init) ?? .left
+        sidePerDisplay = store.bool(forKey: "sidebar.perDisplay")
+        sideDisplays = (store.dictionary(forKey: "sidebar.displays") as? [String: String] ?? [:])
+            .compactMapValues(SidebarPosition.init)
         sideHides = store.bool(forKey: "sidebar.hides")
         let width = store.object(forKey: "sidebar.width") as? Double ?? Double(Metrics.side)
         sideWidth = min(Metrics.sideMax, max(Metrics.sideMin, CGFloat(width)))

@@ -434,7 +434,7 @@ struct ContentView: View {
         .ignoresSafeArea()
         .background { fullscreenWatch }
         .animation(Motion.glide, value: browser.prefs.sidebar)
-        .animation(Motion.glide, value: browser.prefs.sidePosition)
+        .animation(Motion.glide, value: browser.sidePosition)
         .animation(.easeOut(duration: 0.12), value: fullscreenTab?.id)
         .onAppear { if room == nil { room = chrome } }
         .onChange(of: chrome) { old, new in make(room: new, after: old) }
@@ -511,7 +511,7 @@ struct ContentView: View {
     private var roomed: CGSize { room ?? chrome }
 
     private var sideOnRight: Bool {
-        browser.prefs.sidebar && browser.prefs.sidePosition == .right
+        browser.prefs.sidebar && browser.sidePosition == .right
     }
 
     /// Chrome going away gives the page its room at once, the page sliding
@@ -675,7 +675,7 @@ struct ContentView: View {
                 window?.backgroundColor = side ? Palette.NS.frame : Palette.NS.ground
                 DispatchQueue.main.async { Lights.refresh(window); measureLights() }
             }
-            .onChange(of: browser.prefs.sidePosition) { _, _ in
+            .onChange(of: browser.sidePosition) { _, _ in
                 DispatchQueue.main.async { Lights.refresh(window); measureLights() }
             }
             .onChange(of: browser.prefs.sideWidth) { _, _ in
@@ -990,7 +990,7 @@ struct ContentView: View {
         // Lights.swift. The column's first row is the strip's height too, so
         // its three doors sit on the lights' line.
         Lights.keep(window, centreX: {
-            browser.prefs.sidebar && browser.prefs.sidePosition == .right
+            browser.prefs.sidebar && browser.sidePosition == .right
                 ? window.frame.width - browser.prefs.sideWidth + Lights.centre.x
                 : Lights.centre.x
         }) { measureLights() }
