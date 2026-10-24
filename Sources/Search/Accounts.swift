@@ -10,6 +10,9 @@ import SwiftUI
 struct AccountList: View {
     @ObservedObject var browser: Browser
     let asked: Browser.Suggesting
+    /// How big the list came out, for a host that has to know where it is
+    /// to keep a click on it (see PaneStage's AccountHost).
+    var onSize: ((CGSize) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -21,10 +24,20 @@ struct AccountList: View {
                 Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
                     name: login.user.isEmpty ? "No name" : login.user, detail: login.host) { browser.choose(login) }
             }
+            // The Mac's Passwords app, when turned on (ApplePasswords.swift):
+            // after Search's own, marked as Apple's.
+            ForEach(asked.apple) { login in
+                Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
+                    name: login.user.isEmpty ? "No name" : login.user, detail: "Apple Passwords") { browser.choose(login) }
+            }
+            if asked.appleConnect {
+                Row(mark: .symbol("key.icloud"), name: "Connect Apple Passwords…",
+                    detail: "Pair once with a code from your Mac") { browser.connectApplePasswords() }
+            }
             HStack(spacing: 6) {
                 Image(systemName: "key")
                     .font(.system(size: 9, weight: .medium))
-                Text(asked.logins.isEmpty ? "Passkeys on this Mac" : "From your keychain")
+                Text(footer)
                     .font(.system(size: 10.5))
                 Spacer(minLength: 0)
             }
@@ -41,9 +54,16 @@ struct AccountList: View {
                 .strokeBorder(Palette.hairline, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.14), radius: 22, y: 8)
+        .onGeometryChange(for: CGSize.self, of: \.size) { onSize?($0) }
         // Just under the box, left edges lined up. The offset is from the
         // stage's top-left, which is also the web view's.
         .offset(x: asked.spot.minX, y: asked.spot.maxY + 6)
+    }
+
+    private var footer: String {
+        if asked.logins.isEmpty && asked.apple.isEmpty && !asked.appleConnect { return "Passkeys on this Mac" }
+        if asked.logins.isEmpty { return "From Apple Passwords" }
+        return asked.apple.isEmpty ? "From your keychain" : "From your keychain and Apple Passwords"
     }
 
     private enum Mark { case letter(String), symbol(String) }

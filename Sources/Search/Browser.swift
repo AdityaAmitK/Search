@@ -13,8 +13,6 @@ import Combine
 @MainActor
 enum Shared {
     static let prefs = Preferences()
-    static let bookmarks = Bookmarks()
-    static let history = History()
     static let curtain = Curtain()
     static let loot = Loot()
     static let floater = Float()
@@ -69,6 +67,7 @@ final class Browser: NSObject, ObservableObject {
                 DispatchQueue.main.async { held.forEach { $0.present() } }
             }
             guard oldValue != activeID else { return }
+            if displayTab?.id == oldValue { cancelDisplay() }
             clearTabSelection()
             // What was found belongs to the page just left; the words typed
             // go on to be looked for on this one.
@@ -161,20 +160,31 @@ final class Browser: NSObject, ObservableObject {
     /// one of them changes.
     let prefs = Shared.prefs
     let linkStatus = LinkStatus()
-    /// The settings panel.
-    @Published var tuning = false
+    /// Settings, in its own tab (see InternalPages.swift). True while the
+    /// window has one; set, it is shown or closed.
+    var tuning: Bool {
+        get { pageTab(.settings) != nil }
+        set { if newValue { show(InternalPage(.settings, settingsPage.rawValue)) } else { putAway(.settings) } }
+    }
     /// The first-launch walk-through, over everything. Also from the menu.
     @Published var welcoming = false
     /// What's new, once after an update (see WhatsNew.swift).
     @Published var newsShowing = false
-    /// Every version's notes: Settings › About › What's New…
-    @Published var notesShowing = false
+    /// Every version's notes: Settings › About › What's New…, in a tab.
+    var notesShowing: Bool {
+        get { pageTab(.notes) != nil }
+        set { if newValue { show(InternalPage(.notes)) } else { putAway(.notes) } }
+    }
 
     // MARK: - bookmarks
 
-    let bookmarks = Shared.bookmarks
-    /// The full list, for taking things out.
-    @Published var bookmarking = false
+    /// This window's profile's (see Profiles.swift).
+    let bookmarks: Bookmarks
+    /// The full list, for taking things out, in a tab.
+    var bookmarking: Bool {
+        get { pageTab(.bookmarks) != nil }
+        set { if newValue { show(InternalPage(.bookmarks)) } else { putAway(.bookmarks) } }
+    }
     /// The dropdown off the button.
     @Published var bookmarksOpen = false
     /// What hangs off the button instead of the list: the card for one
@@ -254,9 +264,14 @@ final class Browser: NSObject, ObservableObject {
         return (count, already, kept)
     }
 
-    /// The "Bring things over" sheet, open while set: the browser it
-    /// starts on by name, or "" for the first one found.
-    @Published var bringingIn: String?
+    /// Bring Things Over, in a tab, open while set: the browser it starts
+    /// on by name, or "" for the first one found.
+    var bringingIn: String? {
+        get { pageTab(.importing).map { $0.page?.detail ?? "" } }
+        set {
+            if let newValue { show(InternalPage(.importing, newValue)) } else { putAway(.importing) }
+        }
+    }
     struct FileImportJob: Identifiable {
         let id: UUID
         let filename: String
@@ -328,7 +343,8 @@ final class Browser: NSObject, ObservableObject {
     /// answers to this string.
     @Published var typed = "" { didSet { guess() } }
 
-    let history = Shared.history
+    /// This window's profile's (see Profiles.swift).
+    let history: History
     /// What the field is offering, best first.
     @Published private(set) var offers: [Suggestion] = []
     /// The rest of the best match, drawn grey after the caret. Tab takes it.
@@ -338,7 +354,13 @@ final class Browser: NSObject, ObservableObject {
     /// Bumped when what was typed isn't an address and can't be searched for.
     @Published private(set) var refusals = 0
     /// Bumped whenever the cursor should go back into the field.
-    @Published private(set) var focusRequest = 0
+    @Published private(set) var focusRequest = 0 {
+        didSet { focusAsked = CACurrentMediaTime() }
+    }
+    /// When the field was last asked for the keys and hasn't taken them yet.
+    private var focusAsked: CFTimeInterval?
+    /// What was typed in that moment, for the field once it has the keys.
+    private var heldKeys: [NSEvent] = []
 
     /// True while the field is a switcher rather than an address bar. ⌘K asks
     /// one question — which of the pages I already have open — and answering it
@@ -428,7 +450,7 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func openFind() {
-        guard active?.isBlank == false else { return }
+        guard active?.isWeb == true else { return }
         finding = true
         findFocus += 1
     }
@@ -554,7 +576,7 @@ final class Browser: NSObject, ObservableObject {
         if let web { clearFind(on: web) }
         guard retryOnActiveTab, finding,
               !needle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let tab = active, !tab.loading, !tab.isBlank else { return }
+              let tab = active, !tab.loading, tab.isWeb else { return }
         look(forward: true)
     }
 
@@ -582,7 +604,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// ⌘⇧H. Point at anything on the page and it goes, for good, on this site.
     func toggleHiding() {
-        guard let tab = active, !tab.isBlank else { return }
+        guard let tab = active, tab.isWeb else { return }
         if veiling {
             veiling = false
             tab.stopPicking()
@@ -668,7 +690,8 @@ final class Browser: NSObject, ObservableObject {
     struct Suggesting: Equatable {
         let tab: Tab.ID
         var spot: CGRect
-        let logins: [Login]
+        /// Without secrets: one is read only for the account picked.
+        let logins: [Kept]
         /// The Mac's passkeys for a page waiting for one under its field.
         var passkeys: [Passkeys.Offered] = []
         /// The page the list was made for: its site, and whether it came in
@@ -677,6 +700,13 @@ final class Browser: NSObject, ObservableObject {
         let clear: Bool
         /// Hung from a first step's name box: a pick puts in the name alone.
         var nameOnly = false
+        /// Accounts from the Mac's Passwords app (ApplePasswords.swift),
+        /// names only, and the page host they were asked for. Set when the
+        /// helper answers, after the list is up.
+        var apple: [AppleLogin] = []
+        var appleHost: String?
+        /// Apple Passwords is on but not paired: a row to connect.
+        var appleConnect = false
         /// When it came up. A page can put the caret in a sign-in box
         /// itself, an invisible one under the pointer included: a click that
         /// was already on its way is not a choice, so the list takes none for
@@ -697,6 +727,9 @@ final class Browser: NSObject, ObservableObject {
     /// The sign-in box the caret is in, for a list that changes while it is
     /// there: the page's passkeys arrive when they arrive.
     private var field: (tab: Tab.ID, spot: CGRect, passwords: Bool, name: Bool)?
+    /// Counts the boxes Apple Passwords was asked about: an answer for a box
+    /// the caret has left since is dropped.
+    private var appleAsk = 0
 
     func keepOffer() {
         guard let offer = offering else { return }
@@ -727,7 +760,7 @@ final class Browser: NSObject, ObservableObject {
     /// does it, and what a person expects.
     private func hang(from tab: Tab, _ spot: CGRect?, passwords: Bool, name: Bool = false) {
         guard let spot else {
-            if field?.tab == tab.id { field = nil }
+            if field?.tab == tab.id { field = nil; appleAsk += 1 }
             if looked?.tab == tab.id { looked = nil }
             if pickedInto == tab.id { pickedInto = nil }
             guard suggesting?.tab == tab.id else { return }
@@ -766,7 +799,7 @@ final class Browser: NSObject, ObservableObject {
         // Passwords only for a box that goes with one: a box for passkeys
         // alone has no password to put anywhere.
         var kept = prefs.fillsPasswords && passwords
-            ? Vault.logins(matching: host).filter { !inTheClear || $0.clear } : []
+            ? Vault.kept(matching: host).filter { !inTheClear || $0.clear } : []
         // The account whose name the step before was sent with comes first:
         // the password page of a sign-in that asks for the name first.
         if let given = tab.givenName(),
@@ -775,20 +808,168 @@ final class Browser: NSObject, ObservableObject {
         }
         let known = Array(kept.prefix(5))
         let passkeys = Passkeys.shared.offered(in: tab.built)
-        guard !known.isEmpty || !passkeys.isEmpty else {
+        // The Mac's Passwords app, when turned on: an https page of an
+        // ordinary tab only, asked about by its own host. Paired, its names
+        // join the list when the helper answers; not yet, a row offers to
+        // connect.
+        let appleHost = prefs.applePasswords && prefs.fillsPasswords && passwords
+            ? ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) : nil
+        let apple = applePasswords
+        let connect = appleHost != nil && apple.state == .idle && applePairing?.tab != tab.id
+        appleAsk += 1
+        // Asked only for the tab in front of you, in the window you are in.
+        if let appleHost, apple.state == .paired, tab.built?.window?.isKeyWindow == true {
+            lookUpApple(appleHost, in: tab, host: host, name: name)
+        }
+        guard !known.isEmpty || !passkeys.isEmpty || connect else {
             suggesting = nil
             return
         }
         // What is under the pointer changed: the half second starts again.
-        if let up = suggesting, up.tab == tab.id, up.logins == known, up.passkeys == passkeys, up.nameOnly == name {
+        if let up = suggesting, up.tab == tab.id, up.logins == known, up.passkeys == passkeys, up.nameOnly == name,
+           up.appleConnect == connect, up.apple.isEmpty {
             suggesting?.spot = spot
             return
         }
-        suggesting = Suggesting(tab: tab.id, spot: spot, logins: known, passkeys: passkeys, host: host, clear: inTheClear, nameOnly: name)
+        suggesting = Suggesting(tab: tab.id, spot: spot, logins: known, passkeys: passkeys, host: host, clear: inTheClear,
+                                nameOnly: name, appleHost: appleHost, appleConnect: connect)
+    }
+
+    /// Asks Apple's helper for the names it keeps for the page, and adds
+    /// them under the box if the caret is still in it, on the same page.
+    private func lookUpApple(_ appleHost: String, in tab: Tab, host: String, name: Bool) {
+        let ask = appleAsk
+        Task { [weak self] in
+            // A page that moves the caret from box to box queues no backlog:
+            // a question the caret has already left is never sent.
+            guard let keeper = self?.applePasswords else { return }
+            let found = await keeper.logins(for: appleHost, tab: tab.id) { [weak self] in
+                self?.appleAsk == ask
+            }
+            guard let self, ask == appleAsk, let field, field.tab == tab.id, tab.id == activeID,
+                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost
+            else { return }
+            let mine = suggesting?.tab == tab.id ? suggesting?.logins ?? [] : []
+            let apple = Array(found
+                .filter { ApplePasswords.belongs($0.sites, to: appleHost) }
+                .filter { theirs in !mine.contains { $0.user.caseInsensitiveCompare(theirs.user) == .orderedSame } }
+                .prefix(5))
+            guard !apple.isEmpty else { return }
+            if var up = suggesting, up.tab == tab.id {
+                up.apple = apple
+                up.appleHost = appleHost
+                up.appleConnect = false
+                // New rows under the pointer: the half second starts again.
+                up.shown = Date()
+                suggesting = up
+            } else {
+                suggesting = Suggesting(tab: tab.id, spot: field.spot, logins: [], host: host, clear: false,
+                                        nameOnly: name, apple: apple, appleHost: appleHost)
+            }
+        }
+    }
+
+    /// One of the Passwords app's accounts, picked by name. Its password is
+    /// asked for now (macOS may want Touch ID), put into the page if it is
+    /// still the page it was asked for, and not kept.
+    func choose(_ apple: AppleLogin) {
+        lowering?.cancel()
+        guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }), let appleHost = list.appleHost else { return }
+        guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        suggesting = nil
+        guard ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost,
+              ApplePasswords.belongs(apple.sites, to: appleHost)
+        else { return }
+        pickedInto = tab.id
+        if list.nameOnly {
+            tab.fillName(apple.user) { [weak self] worked in
+                if !worked { self?.announce("Couldn't find the sign-in fields anymore") }
+            }
+            return
+        }
+        Task { [weak self] in
+            guard let keeper = self?.applePasswords else { return }
+            let found = await keeper.password(for: apple.user, host: appleHost, tab: tab.id)
+            guard let self else { return }
+            guard let found else {
+                announce("Apple Passwords didn't hand that password over")
+                return
+            }
+            // Touch ID can take a while: the page must still be the one
+            // asked for, in front, and the account still this site's.
+            guard tabs.contains(where: { $0 === tab }), tab.id == activeID,
+                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost,
+                  ApplePasswords.belongs(found.sites, to: appleHost)
+            else { return }
+            tab.appleFill = AppleFill(host: appleHost, user: apple.user, password: found.password)
+            // Over https only, on that host (Tab.fill checks both in the page).
+            tab.fill(user: apple.user, password: found.password, onlyOn: URL(string: "https://\(appleHost)/")) { [weak self] worked in
+                if !worked { self?.announce("Couldn't find the sign-in fields anymore") }
+            }
+        }
+    }
+
+    /// The row that connects Apple Passwords: the pairing starts, and the
+    /// code is typed into a small card of Search's own where the list was,
+    /// not in Settings. Once paired, the caret goes back to the box and the
+    /// accounts come up under it.
+    func connectApplePasswords() {
+        lowering?.cancel()
+        // The same half second as any row: a click already on its way when
+        // a page put the caret in a box isn't a choice.
+        guard let list = suggesting, Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        suggesting = nil
+        beginApplePairing(on: list.tab, at: list.spot)
+    }
+
+    /// Pairing with Apple Passwords from under a sign-in box: the card that
+    /// takes the code, over the page it was asked from. Native, never in the
+    /// page; the page learns nothing of it.
+    @Published private(set) var applePairing: ApplePairing?
+
+    struct ApplePairing: Equatable {
+        let tab: Tab.ID
+        let spot: CGRect
+    }
+
+    /// The Passwords app's connection. One for the whole app; a test gives
+    /// its own, with a made-up helper.
+    var applePasswords = ApplePasswords.shared
+    private var pairingWatch: AnyCancellable?
+
+    func beginApplePairing(on tab: Tab.ID, at spot: CGRect) {
+        let apple = applePasswords
+        applePairing = ApplePairing(tab: tab, spot: spot)
+        pairingWatch = apple.$state
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                MainActor.assumeIsolated {
+                    if state == .paired { self?.endApplePairing(paired: true) }
+                }
+            }
+        if apple.state == .idle { Task { await apple.connect() } }
+    }
+
+    /// The card goes. Paired: the caret back in the page's box, which says
+    /// so again (focusin), and its accounts are asked for. Cancelled: the
+    /// helper is stopped and its window with it.
+    func endApplePairing(paired: Bool) {
+        guard let pairing = applePairing else { return }
+        applePairing = nil
+        pairingWatch = nil
+        if !paired, applePasswords.state != .paired { applePasswords.disconnect() }
+        // Only the page it was asked from, still in front: never another.
+        guard pairing.tab == activeID, let tab = tabs.first(where: { $0.id == pairing.tab }),
+              let web = tab.built, let window = web.window
+        else { return }
+        looked = nil
+        pickedInto = nil
+        window.makeFirstResponder(web)
     }
 
     /// One of the accounts in the list, picked by name.
-    func choose(_ login: Login) {
+    func choose(_ login: Kept) {
         lowering?.cancel()
         guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }) else { return }
         guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
@@ -807,7 +988,12 @@ final class Browser: NSObject, ObservableObject {
             }
             return
         }
-        tab.fill(user: login.user, password: login.password) { [weak self] worked in
+        // Its secret is read now, once it is picked: see `Vault.kept(for:)`.
+        guard let login = Vault.login(login) else {
+            announce("The keychain refused it")
+            return
+        }
+        tab.fill(user: login.user, password: login.password, onlyOn: tab.pageAddress) { [weak self] worked in
             if !worked { self?.announce("Couldn't find the sign-in fields anymore") }
         }
         Vault.touch(login)
@@ -831,7 +1017,11 @@ final class Browser: NSObject, ObservableObject {
 
     // The list of what is kept.
 
-    @Published var managing = false { didSet { if managing { relist() } } }
+    /// Passwords, in a tab. The list is read again each time it is asked for.
+    var managing: Bool {
+        get { pageTab(.passwords) != nil }
+        set { if newValue { show(InternalPage(.passwords)) } else { putAway(.passwords) } }
+    }
     /// The list, without secrets: see `Kept` and `Vault.all()`.
     @Published private(set) var saved: [Kept] = []
     @Published var hunting = ""
@@ -960,7 +1150,8 @@ final class Browser: NSObject, ObservableObject {
         case .success(let found):
             let kept = keep(found)
             ImportRecords.note(name, passwords: kept)
-            announce(kept == 0 ? "Nothing new in \(name)" : "\(kept) passwords from \(name)")
+            let locked = found.undecrypted > 0 ? " (\(found.undecrypted) couldn't be decrypted)" : ""
+            announce((kept == 0 ? "Nothing new in \(name)" : "\(kept) passwords from \(name)") + locked)
         case .failure(Chromium.Trouble.noPassphrase):
             announce("\(name) didn't give up its keychain key")
         case .failure(Mozilla.Trouble.primaryPassword):
@@ -1127,11 +1318,16 @@ final class Browser: NSObject, ObservableObject {
 
     // One state keeps closing History from leaving its clearing controls open.
     @Published var recallMode: RecallMode?
+    /// History, in a tab.
     var recalling: Bool {
-        get { recallMode != nil }
-        set { recallMode = newValue ? .history : nil }
+        get { pageTab(.history) != nil }
+        set { if newValue { show(InternalPage(.history)) } else { putAway(.history) } }
     }
-    @Published var hoarding = false
+    /// Downloads, in a tab.
+    var hoarding: Bool {
+        get { pageTab(.downloads) != nil }
+        set { if newValue { show(InternalPage(.downloads)) } else { putAway(.downloads) } }
+    }
     @Published var recallHunt = ""
 
     /// Cookies, caches, local storage — everything a site left on this Mac,
@@ -1139,8 +1335,9 @@ final class Browser: NSObject, ObservableObject {
     /// the point.
     func clearSites() {
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
-        for space in spaces {
-            Spaces.store(for: space.id).removeData(ofTypes: types, modifiedSince: .distantPast) {}
+        // This profile's: another profile is another browser.
+        for store in Spaces.stores(of: profileID) {
+            store.removeData(ofTypes: types, modifiedSince: .distantPast) {}
         }
         announce("Signed out of everything")
     }
@@ -1152,8 +1349,8 @@ final class Browser: NSObject, ObservableObject {
             WKWebsiteDataTypeMemoryCache,
             WKWebsiteDataTypeOfflineWebApplicationCache,
         ]
-        for space in spaces {
-            Spaces.store(for: space.id).removeData(ofTypes: types, modifiedSince: .distantPast) {}
+        for store in Spaces.stores(of: profileID) {
+            store.removeData(ofTypes: types, modifiedSince: .distantPast) {}
         }
         announce("Cache cleared")
     }
@@ -1184,6 +1381,9 @@ final class Browser: NSObject, ObservableObject {
         /// always; in a private tab it is never kept.
         var once = false
         var keeps = true
+        var screen = false
+        /// The page also asks for the Mac's own sound with the screen.
+        var sound = false
         /// When it came up. A page can time a click to land where Allow is
         /// about to be: the card takes none in its first half second.
         var shown = Date()
@@ -1192,20 +1392,68 @@ final class Browser: NSObject, ObservableObject {
 
     @Published private(set) var asking: CaptureAsk?
     private var decide: ((WKPermissionDecision) -> Void)?
+    /// WebKit's screen-sharing answers: deny (0), screen (1), window (2).
+    private var decideDisplay: ((Int) -> Void)?
+    private weak var displayTab: Tab?
+    private var displayHeld: HeldQuestion?
+    private var displayRequest: UUID?
+    private var permissionBusy: Bool { decide != nil || decideDisplay != nil }
+    private(set) static var displayAnswered: Int?
     private var askedAbout = ""
 
     func allowCapture() { answerCapture(.grant) }
     func allowCaptureOnce() { answerCapture(.grant, keep: false) }
     func denyCapture() { answerCapture(.deny) }
 
+    func shareScreen() { answerDisplay(1) }
+    func shareWindow() { answerDisplay(2) }
+    func denyShare() { answerDisplay(0) }
+
+    private func answerDisplay(_ decision: Int) {
+        guard decideDisplay != nil, let asking, asking.screen,
+              Date().timeIntervalSince(asking.shown) > 0.5 else { return }
+        finishDisplay(decision)
+    }
+
+    func cancelDisplay(for webView: WKWebView? = nil) {
+        guard webView == nil || displayTab?.built === webView else { return }
+        finishDisplay(0)
+    }
+
+    private func finishDisplay(_ decision: Int) {
+        guard let reply = decideDisplay else { return }
+        decideDisplay = nil
+        displayRequest = nil
+        if let tab = displayTab, let held = displayHeld {
+            heldDialogs[tab.id]?.removeAll { $0 === held }
+        }
+        displayHeld = nil
+        displayTab = nil
+        if asking?.screen == true { asking = nil }
+        // A test records the choice without ever opening the system picker.
+        if Store.testing { Browser.displayAnswered = decision }
+        reply(Store.testing ? 0 : decision)
+    }
+
+    /// A page or popup going away must settle its permission callback too,
+    /// the screen's included.
+    func cancelCapture() {
+        cancelDisplay()
+        let pending = decide
+        decide = nil
+        askedAbout = ""
+        asking = nil
+        pending?(.deny)
+    }
+
     private func answerCapture(_ decision: WKPermissionDecision, keep: Bool = true) {
         guard let decide, let asking, Date().timeIntervalSince(asking.shown) > 0.5 else { return }
         // Remembered per site, so a call you take every week asks once.
         if keep, !askedAbout.isEmpty { Store.settings.set(decision == .grant, forKey: "capture." + askedAbout) }
-        decide(decision)
         self.decide = nil
         askedAbout = ""
         self.asking = nil
+        decide(decision)
     }
 
     /// Everything a site has been allowed or refused, for the day you want to
@@ -1247,7 +1495,7 @@ final class Browser: NSObject, ObservableObject {
         objectWillChange.send()
         // Pins are the space's, kept on disk and shown in every window: a
         // private tab can't be one, or its page would outlive it there.
-        guard !tab.shy else { return }
+        guard !tab.shy, tab.page == nil else { return }
         detachSplit(tab)
         if tab.pin == nil {
             let previousGroup = tab.groupID
@@ -1359,7 +1607,7 @@ final class Browser: NSObject, ObservableObject {
             // One every space shows: out of them all, as unpinning in one
             // window is out of every window.
             tab.everywhere = false
-            Pins.setShared(Pins.shared.filter { $0.id != id }, from: self)
+            Pins.setShared(Pins.shared(profileID).filter { $0.id != id }, from: self)
             for space in Array(parked.keys) { pinsChanged(in: space) }
         }
         tab.pin = nil
@@ -1375,6 +1623,75 @@ final class Browser: NSObject, ObservableObject {
             }
         }
         rememberSession()
+    }
+
+    // MARK: - carried onto the pins, and off them
+
+    /// Whether a tab carried onto the pins may become one there. Not a
+    /// private tab (see pin), and not a pair: pinning one half would undo
+    /// the pair under the hand. Pin Tab in the menu still pins the half
+    /// it was asked for.
+    func pinsByDrag(_ tab: Tab) -> Bool {
+        tab.pin == nil && !tab.shy && split(for: tab) == nil && tabs.contains { $0.id == tab.id }
+    }
+
+    /// The place a tab let go at `proposed` among the squares (or, with
+    /// `listed`, the pinned rows) would really take: past the pins every
+    /// space shows, which keep the head of the block (see keepBlocks) — and
+    /// a shared pin among them — and never past the end.
+    func pinSlot(_ tab: Tab, listed: Bool, proposed: Int) -> Int {
+        let tier = tabs.filter { $0.pin != nil && $0.listed == listed && $0.id != tab.id }
+        let shared = prefs.showsSharedPins ? tier.prefix(while: \.everywhere).count : 0
+        let low = tab.everywhere ? 0 : shared
+        let high = tab.everywhere ? shared : tier.count
+        return min(max(proposed, low), high)
+    }
+
+    /// A tab carried onto the pins and let go there (Arc's drag): pinned as
+    /// Pin Tab pins it — its page, its web view and its place in history
+    /// kept — then put at `slot` among the squares, or with `listed` among
+    /// the pinned rows. A pin of the other kind carried there changes kind,
+    /// as Show as Row does. The pin is this space's own, as Pin Tab makes
+    /// it; with pins in every space on, it lands after the shared ones.
+    @discardableResult
+    func pinDropped(_ tab: Tab, listed: Bool, at slot: Int) -> Bool {
+        if tab.pin == nil {
+            guard pinsByDrag(tab) else { return false }
+            pin(tab, listed: listed)
+            guard tab.pin != nil else { return false }
+        } else if tab.listed != listed {
+            setListed(tab, listed)
+        }
+        let at = pinSlot(tab, listed: listed, proposed: slot)
+        let pins = tabs.filter { $0.pin != nil }
+        var tier = pins.filter { $0.listed == listed && $0.id != tab.id }
+        tier.insert(tab, at: min(at, tier.count))
+        let squares = listed ? pins.filter { !$0.listed } : tier
+        let rows = listed ? tier : pins.filter(\.listed)
+        let row = squares + rows + tabs.filter { $0.pin == nil }
+        if !row.elementsEqual(tabs, by: { $0.id == $1.id }) { tabs = row }
+        writeSession(now: true)
+        return true
+    }
+
+    /// A pin carried out among the tabs and let go there: unpinned as Unpin
+    /// unpins it — a pin every space shows leaves them all, as it does from
+    /// the menu — and put at `slot` among the tabs in no group, or into
+    /// `group`. The page stays as it is.
+    @discardableResult
+    func unpinDropped(_ tab: Tab, at slot: Int, group: UUID? = nil) -> Bool {
+        guard tab.pin != nil, tabs.contains(where: { $0.id == tab.id }) else { return false }
+        unpin(tab)
+        if let group, prefs.usesTabGroups, tabGroups.contains(where: { $0.id == group }) {
+            move(tab, toGroup: group)
+        } else if prefs.usesTabGroups {
+            let peers = tabs(in: nil).filter(standsInRow)
+            move(tab, within: nil, to: min(max(0, slot), peers.count - 1))
+        } else {
+            moveDisplayedTab(tab, to: min(pinnedCount + max(0, slot), displayedTabs.count - 1))
+        }
+        writeSession(now: true)
+        return true
     }
 
     // MARK: - the address, in the tab itself
@@ -1394,7 +1711,7 @@ final class Browser: NSObject, ObservableObject {
     private var tabOriginal = ""
 
     func beginTabEdit(_ tab: Tab) {
-        guard let url = tab.address else {
+        guard let url = tab.shownURL else {
             edit()
             return
         }
@@ -1521,19 +1838,31 @@ final class Browser: NSObject, ObservableObject {
         announce("Address copied")
     }
 
+    /// ⌥⇧⌘C. The address without its tracking parameters (CleanLink).
+    func copyCleanLink() {
+        guard let url = active?.address else { return }
+        CleanLink.copy(url)
+        announce("Clean link copied")
+    }
+
     /// For pasting into notes and messages that read Markdown: a title that
     /// links, not a bare address to explain in your own words.
     func copyMarkdownLink() {
         guard let tab = active, let url = tab.address else { return }
-        // A backslash first, so the ones added next aren't doubled; then both
-        // brackets, either of which would end or break the link's text.
-        let title = tab.label
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Browser.markdownLink(tab.label, url), forType: .string)
+        announce("Link copied")
+    }
+
+    /// A page as a Markdown link, its title the text. A backslash first, so
+    /// the ones added next aren't doubled; then both brackets, either of
+    /// which would end or break the link's text.
+    static func markdownLink(_ title: String, _ url: URL) -> String {
+        let text = title
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("[\(title)](\(url.absoluteString))", forType: .string)
-        announce("Link copied")
+        return "[\(text)](\(url.absoluteString))"
     }
 
     func announce(_ text: String, file: URL? = nil) {
@@ -1614,9 +1943,12 @@ final class Browser: NSObject, ObservableObject {
     private var remembering = false
     /// Spaces (see Spaces.swift): every one, the one on screen, and the
     /// rows of tabs of the others.
-    @Published var spaces = Spaces.read() {
-        didSet { Spaces.sharing = Set(spaces.filter { $0.sharesSignIns == true }.map(\.id)) }
-    }
+    /// The window's profile's spaces only: another profile's never show
+    /// here (see Profiles.swift).
+    @Published var spaces: [Space]
+    /// The profile this window is in, for its whole life: its spaces, its
+    /// sign-ins, its history and bookmarks.
+    let profileID: UUID
     @Published var spaceID = Space.firstID
     var parked: [UUID: Parked] = [:]
     /// How far the column's rows have followed two fingers sideways, and
@@ -1627,6 +1959,9 @@ final class Browser: NSObject, ObservableObject {
     var afterSpaceCreated: ((Space) -> Void)?
     /// A link's page, peeked at over this one (see Peek.swift).
     @Published var peekTab: Tab?
+    /// The tab the peek was opened from: a pin wears the peek's icon while
+    /// it is up (see PeekBadge).
+    @Published var peekFrom: UUID?
     /// Which way the last change of space went: 1 to the next, -1 back.
     @Published var spaceStep = 1
 
@@ -1668,6 +2003,9 @@ final class Browser: NSObject, ObservableObject {
     /// the page under a thin line with its site; it is never saved, never
     /// brought back, and never the window menus act on (see Windows.swift).
     var extensionPopup: String?
+    /// A sized website pop-up, kept separately from an extension's identity.
+    let websitePopup: Bool
+    var isPopup: Bool { websitePopup || extensionPopup != nil }
     /// Its saved state, for a window other than the oldest (see Windows.swift).
     var record = WindowRecord()
     /// Whether its rows are the session files' — the oldest window's — or
@@ -1681,11 +2019,24 @@ final class Browser: NSObject, ObservableObject {
 
     /// `record`: another window's, from windows.json or ⇧⌘T, or a new
     /// window's, empty.
-    init(record: WindowRecord?) {
+    init(record: WindowRecord?, websitePopup: Bool = false) {
+        self.websitePopup = websitePopup
+        // The profile of the space the window shows: the one it was in, or
+        // the space the app was last in, for the first window.
+        let shown = record?.space ?? Store.settings.string(forKey: "space.current").flatMap(UUID.init) ?? Space.firstID
+        let profile = Spaces.profile(of: shown)
+        profileID = profile
+        spaces = Spaces.read(profile: profile)
+        history = Profiles.history(profile)
+        bookmarks = Profiles.bookmarks(profile)
+        spaceID = Spaces.read(profile: profile).first?.id ?? Space.firstID
         super.init()
         let first = !Browser.booted
         Browser.booted = true
-        usesFiles = record == nil
+        // The session files of a profile are its oldest window's: the first
+        // window's, and a window of a profile no open window is in.
+        // A pop-up window never holds a profile's session files.
+        usesFiles = !websitePopup && (record == nil || !Browsers.all.contains { $0.profileID == profile && $0.usesFiles && !$0.isPopup })
         if first {
             Shield.shared.enabled = prefs.shielded
             Shield.shared.compile()
@@ -1700,15 +2051,16 @@ final class Browser: NSObject, ObservableObject {
             // Once a day, quietly: is there a newer one?
             Updater.shared.checkIfDue { [weak self] line in self?.announce(line) }
             FormRelay.passkeysOffered = prefs.passkeys
-            // An icon that arrives is put on every tab showing that site, in
-            // every window, not only the one that happened to ask for it.
-            Favicons.shared.arrived = { site, image in
+            // An icon that arrives is looked for again by every tab showing
+            // that site, in every window, not only the one that asked for it:
+            // each puts on its own page's, or its nearest neighbour's.
+            Favicons.shared.arrived = { site in
                 let lower = site.lowercased()
                 for browser in Browsers.all {
                     for tab in browser.tabs + browser.parkedTabs {
                         guard let tabHost = tab.address.flatMap(Favicons.site) else { continue }
                         if tabHost == lower || tabHost == "www." + lower || lower == "www." + tabHost {
-                            tab.icon = image
+                            tab.adoptIcon()
                         }
                     }
                 }
@@ -1743,8 +2095,12 @@ final class Browser: NSObject, ObservableObject {
         // So are the pins.
         NotificationCenter.default.publisher(for: Pins.changed)
             .sink { [weak self] note in
-                guard let self, (note.object as? Browser) !== self else { return }
-                if note.userInfo?["shared"] as? Bool == true { return sharedPinsChanged() }
+                guard let self, !isPopup, (note.object as? Browser) !== self else { return }
+                if note.userInfo?["shared"] as? Bool == true {
+                    // Another profile's are nothing to this window.
+                    guard (note.userInfo?["profile"] as? UUID) == profileID else { return }
+                    return sharedPinsChanged()
+                }
                 guard let space = note.userInfo?["space"] as? UUID else { return }
                 pinsChanged(in: space)
             }
@@ -1754,9 +2110,17 @@ final class Browser: NSObject, ObservableObject {
         // another window is so here too.
         NotificationCenter.default.publisher(for: Spaces.changed)
             .sink { [weak self] note in
-                guard let self, let list = note.object as? [Space], list != spaces else { return }
+                guard let self, let all = note.object as? [Space] else { return }
+                if websitePopup {
+                    if !all.contains(where: { $0.id == self.spaceID }) { window?.close() }
+                    return
+                }
+                guard !isPopup else { return }
+                // This profile's alone, its first space first.
+                let list = Spaces.read(profile: profileID)
+                guard list != spaces, !list.isEmpty, all.contains(where: { $0.id == list[0].id }) else { return }
                 spaces = list
-                if !list.contains(where: { $0.id == self.spaceID }) { switchSpace(to: Space.firstID) }
+                if !list.contains(where: { $0.id == self.spaceID }) { enter(list[0].id) }
             }
             .store(in: &bag)
 
@@ -1766,20 +2130,34 @@ final class Browser: NSObject, ObservableObject {
         // for WebKit to get up.
         defer {
             follow()
-            watchForSleep()
+            if !isPopup { watchForSleep() }
+            // Before the first frame: tabs whose time ran out while Search
+            // was quit are gone, rather than drawn and taken away a minute on.
+            if !isPopup { closeLeftAlone() }
         }
 
-        Spaces.sharing = Set(spaces.filter { $0.sharesSignIns == true }.map(\.id))
         if let record {
             // Another window: the space it showed, and its own rows.
             self.record = record
-            if prefs.usesSpaces, spaces.contains(where: { $0.id == record.space }) { spaceID = record.space }
-        } else if prefs.usesSpaces, let last = Store.settings.string(forKey: "space.current").flatMap(UUID.init),
-           spaces.contains(where: { $0.id == last }) {
+            if prefs.usesSpaces || websitePopup, spaces.contains(where: { $0.id == record.space }) { spaceID = record.space }
+            // The first window of its profile this run: its rows, if it
+            // brought any (⇧⌘T, last launch's windows.json), are the
+            // profile's session files from now on; a new one reads them.
+            if usesFiles {
+                for (key, row) in record.rows {
+                    guard let space = UUID(uuidString: key), spaces.contains(where: { $0.id == space }) else { continue }
+                    Session.write(now: true, space: space, row)
+                }
+                self.record.rows = [:]
+            }
+        } else if prefs.usesSpaces, spaces.contains(where: { $0.id == shown }) {
             // The space you were in, when there are spaces (see Spaces.swift).
-            spaceID = last
-            Spaces.current = last
+            spaceID = shown
         }
+        if record == nil { Spaces.current = spaceID }
+        // A website pop-up holds only the page WebKit hands over: no pins,
+        // restored tabs or warm pages from other spaces.
+        guard !websitePopup else { return }
         restoreSession()
         if prefs.usesSpaces { preloadSpaces() }
     }
@@ -1849,18 +2227,7 @@ final class Browser: NSObject, ObservableObject {
         let front = saved.tabs.isEmpty || saved.active < 0 ? nil
             : restored.active.flatMap { id in tabs.first { $0.id == id } } ?? tabs.first { $0.pin == nil } ?? tabs.first
         guard let first = front else {
-            // A blank tab costs nothing until it is asked for its page. Its
-            // web view — and with it WebKit's helper processes — is built a
-            // moment after the window is up, so that the first address typed
-            // finds everything already running, and the first frame never
-            // had to share the CPU with it.
-            let tab = Tab(configuration: Web.configuration(space: spaceID))
-            adopt(tab)
-            activeID = tab.id
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak tab] in
-                guard let tab, tab.isBlank else { return }
-                _ = tab.web
-            }
+            frontBlank()
             return
         }
         activeID = first.id
@@ -1878,6 +2245,24 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
+    /// An empty tab at the end of the row, in front: a row with nothing in
+    /// front (a fresh start, see Session.startFresh) opens on one, beside its
+    /// pins, rather than on the first of them.
+    func frontBlank() {
+        // A blank tab costs nothing until it is asked for its page. Its
+        // web view — and with it WebKit's helper processes — is built a
+        // moment after the window is up, so that the first address typed
+        // finds everything already running, and the first frame never
+        // had to share the CPU with it.
+        let tab = Tab(configuration: Web.configuration(space: spaceID))
+        adopt(tab)
+        activeID = tab.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak tab] in
+            guard let tab, tab.isBlank else { return }
+            _ = tab.web
+        }
+    }
+
     /// The few settings that something else has to be told about. The rest are
     /// read where they are used.
     private func follow() {
@@ -1886,7 +2271,15 @@ final class Browser: NSObject, ObservableObject {
         // were before (see Spaces.swift).
         prefs.$usesSpaces
             .dropFirst()
-            .sink { [weak self] on in if on { self?.preloadSpaces() } else { self?.leaveSpaces() } }
+            .sink { [weak self] on in
+                guard let self else { return }
+                if websitePopup {
+                    if !on, spaceID != Space.firstID { window?.close() }
+                    return
+                }
+                guard !isPopup else { return }
+                if on { preloadSpaces() } else { leaveSpaces() }
+            }
             .store(in: &bag)
         // Pins in every space, or Spaces, switched: every row takes the
         // shared pins or lets them go. Received on the next turn of the run
@@ -1971,6 +2364,20 @@ final class Browser: NSObject, ObservableObject {
             }
             .store(in: &bag)
 
+        // Dark pages (see Dusk.swift), turned on or off, paused, or switched
+        // for a site: every tab's next page, and the page each is showing now.
+        Dusk.shared.$revision
+            .dropFirst()
+            .sink { [weak self] _ in
+                // Published before it is set; the pages read the set one.
+                DispatchQueue.main.async { self?.redusk() }
+            }
+            .store(in: &bag)
+        // A page darkened or let go: the View menu's line says which.
+        Dusk.shared.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &bag)
+
         // Every tab's next page, and the page each is showing now.
         prefs.$showsLinks
             .dropFirst()
@@ -2042,7 +2449,7 @@ final class Browser: NSObject, ObservableObject {
         prefs.$autocorrect
             .dropFirst()
             .sink { [weak self] on in
-                guard let self, let web = active?.web else { return }
+                guard let self, let web = active?.built else { return }
                 let selector = NSSelectorFromString("toggleAutomaticSpellingCorrection:")
                 guard web.responds(to: selector) else { return }
                 // Toggling is all there is, so it is only sent when the two
@@ -2073,9 +2480,13 @@ final class Browser: NSObject, ObservableObject {
 
     private func relook() {
         Favicons.shared.relook(tabs.filter { !$0.asleep })
+        // Dark pages are only ever put into a page while Search is dark: a
+        // change of look takes them in, or lets them go.
+        redusk()
     }
 
     func writeSession(now: Bool = false) {
+        guard !isPopup else { return }
         // The pins as they are here, for the other windows (see Pins.swift):
         // the space's own, and the ones every space shows (only from a row
         // that holds them: see Pins.sharedToWrite).
@@ -2111,7 +2522,7 @@ final class Browser: NSObject, ObservableObject {
     /// then by place.
     func reconcilePins(_ row: [Tab], space: UUID) -> [Tab] {
         let showing = prefs.showsSharedPins
-        let shared = showing ? Pins.shared : []
+        let shared = showing ? Pins.shared(profileID) : []
         let sharedIDs = Set(shared.map(\.id))
         let defs = Pins.row(own: Pins.defs(space), shared: shared, showing: showing)
         var pinned = row.filter { $0.pin != nil && !$0.shy }
@@ -2146,6 +2557,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Another window changed a space's pins: this window's row there follows.
     func pinsChanged(in space: UUID) {
+        guard !isPopup else { return }
         if space == spaceID {
             // Drawn again even when only a pin's letter or name changed.
             objectWillChange.send()
@@ -2164,7 +2576,9 @@ final class Browser: NSObject, ObservableObject {
             row.splits.removeAll { pair in
                 !pair.tabs.allSatisfy { id in row.tabs.contains { $0.id == id } }
             }
-            if !row.tabs.contains(where: { $0.id == row.active }) { row.active = row.tabs.first?.id }
+            if let active = row.active, !row.tabs.contains(where: { $0.id == active }) {
+                row.active = row.tabs.first { $0.pin == nil }?.id ?? row.tabs.first?.id
+            }
             parked[space] = row
         }
     }
@@ -2194,7 +2608,7 @@ final class Browser: NSObject, ObservableObject {
         guard prefs.showsSharedPins, tab.pin != nil, !tab.everywhere, !tab.shy else { return }
         writeSession(now: true)
         guard let id = tab.pinID else { return }
-        let moved = Pins.share(id, own: Pins.defs(spaceID), shared: Pins.shared)
+        let moved = Pins.share(id, own: Pins.defs(spaceID), shared: Pins.shared(profileID))
         // The shared list first: in between, the pin is in both lists, which
         // Pins.row counts once, so every other window keeps its tab for it.
         // The other way round it was in neither, and they closed theirs.
@@ -2208,7 +2622,7 @@ final class Browser: NSObject, ObservableObject {
     /// first among its own. The other spaces close theirs.
     func keepHere(_ tab: Tab) {
         guard tab.everywhere, let id = tab.pinID else { return }
-        let moved = Pins.unshare(id, own: Pins.defs(spaceID), shared: Pins.shared)
+        let moved = Pins.unshare(id, own: Pins.defs(spaceID), shared: Pins.shared(profileID))
         Pins.set(spaceID, moved.own, from: self)
         Pins.setShared(moved.shared, from: self)
         sharedPinsChanged()
@@ -2229,27 +2643,51 @@ final class Browser: NSObject, ObservableObject {
         var made = 0, pins = 0, added = 0
         // Every address this brings in, for its icon below.
         var brought: [URL] = []
-        var targets: [(id: UUID, space: ArcSidebar.Space?)] = []
+        var targets: [(id: UUID, space: ArcSidebar.Space?, profile: UUID)] = []
+        // Arc's profiles become Search's (see Profiles.swift): its first,
+        // "Default", is this window's; each other one a profile of the same
+        // name, made if there is none, with its spaces in it, signed in
+        // with that profile's own cookies.
+        let others = Set(sidebar.spaces.map(\.profile)).subtracting(["Default"])
+        let named = others.isEmpty ? [:] : Arc.profileNames()
+        var profileFor: [String: UUID] = ["Default": profileID]
+        for folder in others.sorted() {
+            let name = named[folder] ?? folder
+            if let same = Profiles.shared.list.first(where: { $0.id != profileID && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+                profileFor[folder] = same.id
+            } else {
+                let home = sidebar.spaces.first { $0.profile == folder }
+                    .map { Space(id: UUID(), name: $0.name, colour: 0, icon: $0.symbol, sharesSignIns: true) }
+                profileFor[folder] = Profiles.shared.add(named: name, home: home).id
+                // Its first space, made with it, is a space this brought in.
+                if home != nil { made += 1 }
+            }
+        }
         if sidebar.spaces.count > 1 || (prefs.usesSpaces && !sidebar.spaces.isEmpty) {
             if !prefs.usesSpaces { prefs.usesSpaces = true }
-            var list = spaces
+            var all = Spaces.read()
             for arc in sidebar.spaces {
-                if let same = list.first(where: { $0.name.localizedCaseInsensitiveCompare(arc.name) == .orderedSame }) {
-                    targets.append((same.id, arc))
+                let profile = profileFor[arc.profile] ?? profileID
+                let mine = all.filter { $0.profileID == profile }
+                if let same = mine.first(where: { $0.name.localizedCaseInsensitiveCompare(arc.name) == .orderedSame }) {
+                    targets.append((same.id, arc, profile))
                 } else {
-                    let space = Space(id: UUID(), name: arc.name, colour: 0, icon: arc.symbol,
-                                      sharesSignIns: arc.profile == "Default")
-                    list.append(space)
-                    targets.append((space.id, arc))
+                    let space = Space(id: UUID(), name: arc.name, colour: 0, icon: arc.symbol, sharesSignIns: true,
+                                      profile: profile == Profile.personalID ? nil : profile)
+                    all.append(space)
+                    targets.append((space.id, arc, profile))
                     made += 1
                 }
             }
-            if made > 0 {
-                spaces = list
-                Spaces.write(list)
+            if all.count != Spaces.read().count {
+                Spaces.write(all)
+                spaces = Spaces.read(profile: profileID)
             }
+        } else if let arc = sidebar.spaces.first, let profile = profileFor[arc.profile], profile != profileID {
+            // A lone space of another Arc profile: that profile's first space.
+            targets = [(Profiles.shared.profile(profile).home, arc, profile)]
         } else {
-            targets = [(spaceID, sidebar.spaces.first)]
+            targets = [(spaceID, sidebar.spaces.first, profileID)]
         }
         for target in targets {
             var defs = Pins.defs(target.id)
@@ -2290,8 +2728,17 @@ final class Browser: NSObject, ObservableObject {
                 pins += 1
             }
             Pins.set(target.id, defs, from: self)
-            pinsChanged(in: target.id)
-            added += takeAsleep(rows.isEmpty ? pinned : pinned.filter { $0.folder != nil }, into: target.id)
+            let pages = rows.isEmpty ? pinned : pinned.filter { $0.folder != nil }
+            if target.profile == profileID {
+                pinsChanged(in: target.id)
+                added += takeAsleep(pages, into: target.id)
+            } else if let owner = Browsers.all.first(where: { $0.profileID == target.profile && $0.usesFiles }) {
+                // Another profile's window holds that space's row.
+                owner.pinsChanged(in: target.id)
+                added += owner.takeAsleep(pages, into: target.id)
+            } else {
+                added += takeAsleep(pages, into: target.id, files: true)
+            }
         }
         adoptIcons(for: brought, from: source, profile: profile)
         return (made, pins, added)
@@ -2361,7 +2808,9 @@ final class Browser: NSObject, ObservableObject {
     /// With tab groups on, a page from one of Arc's folders goes into the
     /// group of that name in the space, made if there is none; with them
     /// off, the folders stay opened out. Groups are never turned on here.
-    private func takeAsleep(_ items: [(item: ArcSidebar.Item, folder: String?)], into space: UUID) -> Int {
+    /// `files`: a space of another profile no window is in, its row written
+    /// straight into the profile's session file.
+    private func takeAsleep(_ items: [(item: ArcSidebar.Item, folder: String?)], into space: UUID, files: Bool = false) -> Int {
         func asleep(_ item: ArcSidebar.Item) -> Tab {
             let tab = Tab(configuration: Web.configuration(space: space))
             prepare(tab)
@@ -2383,6 +2832,18 @@ final class Browser: NSObject, ObservableObject {
             let made = TabGroup(id: UUID(), name: folder, collapsed: false)
             groups.append(made)
             return made.id
+        }
+        if files {
+            var saved = Session.read(space: space)
+            var groups = saved.groups ?? []
+            let new = fresh(saved.tabs.map(\.url))
+            saved.tabs += new.map { page in
+                Session.Entry(url: page.item.url.absoluteString, title: page.item.title,
+                              groupID: group(page.folder, in: &groups))
+            }
+            saved.groups = groups
+            Session.write(now: true, space: space, saved)
+            return new.count
         }
         if space == spaceID {
             let new = fresh(tabs.compactMap { ($0.pending ?? $0.address)?.absoluteString })
@@ -2463,20 +2924,43 @@ final class Browser: NSObject, ObservableObject {
     /// into the session files, every space's — an empty row where it has
     /// none, or the closed window's would come back there.
     func becomePrimary() {
+        takeFiles()
+        Store.settings.set(spaceID.uuidString, forKey: "space.current")
+        // SwiftUI's window, opened next launch, comes back where this one is.
+        window?.saveFrame(usingName: Browsers.sceneID)
+    }
+
+    /// The oldest window of its profile closed: this one's rows go into the
+    /// profile's session files, every space's — an empty row where it has
+    /// none, or the closed window's would come back there.
+    func takeFiles() {
+        guard !usesFiles else { return }
         let rows = allRows()
         usesFiles = true
         for space in spaces {
             Session.write(now: true, space: space.id, rows[space.id.uuidString] ?? Session.Shape(tabs: [], active: 0))
         }
         record.rows = [:]
-        Store.settings.set(spaceID.uuidString, forKey: "space.current")
-        // SwiftUI's window, opened next launch, comes back where this one is.
-        window?.saveFrame(usingName: Browsers.sceneID)
+    }
+
+    /// The last window of its profile closing, others open: its rows stay
+    /// in the profile's files, written now, and nothing it does from here on
+    /// touches them — the next window of the profile opens with its tabs.
+    func leaveFiles() {
+        guard usesFiles else { return }
+        flushSession()
+        record.rows = allRows()
+        usesFiles = false
     }
 
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
-        if floating != nil { land() }
+        cancelDisplay()
+        cancelCapture()
+        for questions in heldDialogs.values { questions.forEach { $0.dismiss() } }
+        heldDialogs = [:]
+        dropQuestions()
+        if floating != nil { land(covering: false) }
         if peekTab != nil { closePeek() }
         for tab in tabs + parkedTabs { tab.close() }
         parked = [:]
@@ -2486,23 +2970,33 @@ final class Browser: NSObject, ObservableObject {
 
     private func session(_ tabs: [Tab], active id: Tab.ID?, groups: [TabGroup]? = nil, splits: [TabSplit] = []) -> Session.Shape {
         var entries: [Session.Entry] = []
-        var active = 0
+        // A row with nothing in front — a space not yet gone to since a fresh
+        // start — stays that way in its file, rather than its first tab (a
+        // pin) coming to the front next time.
+        var active = id == nil ? -1 : 0
         var indices: [Tab.ID: Int] = [:]
         for tab in tabs {
-            guard kept(tab), let url = tab.pending ?? tab.address else { continue }
+            guard kept(tab), let url = tab.pending ?? tab.address ?? tab.page?.url else { continue }
             if tab.id == id { active = entries.count }
             indices[tab.id] = entries.count
             entries.append(Session.Entry(
                 url: url.absoluteString, title: tab.title, pin: tab.pin, name: tab.name,
                 home: tab.pin == nil ? nil : tab.home?.absoluteString, groupID: tab.groupID,
                 pinID: tab.pin == nil ? nil : tab.pinID,
+                // A page on screen is being looked at now, not when it was
+                // arrived at: quitting on it is leaving it.
+                touched: visibleTabIDs.contains(tab.id) ? Date() : tab.touched,
+                letGo: tab.pin == nil ? tab.letGo : nil,
                 listed: tab.pin != nil && tab.listed ? true : nil
             ))
         }
-        // The tab you were on isn't kept — a private or blank one: the one
-        // kept just before it comes back in front, not the first of the row.
+        // The tab you were on isn't kept — a private one: the one kept just
+        // before it comes back in front, not the first of the row. An empty
+        // one stays an empty one, beside the pins (see frontBlank): the tab
+        // just before it is the last of the row, often the last page of a
+        // folded group, which then came out of its folder in front.
         if let id, let at = tabs.firstIndex(where: { $0.id == id }), indices[id] == nil {
-            active = max(0, tabs[..<at].filter(kept).count - 1)
+            active = tabs[at].isBlank && !tabs[at].shy ? -1 : max(0, tabs[..<at].filter(kept).count - 1)
         }
         let keptGroups = groups?.filter { group in
             entries.contains { $0.groupID == group.id }
@@ -2525,16 +3019,20 @@ final class Browser: NSObject, ObservableObject {
     private func kept(_ tab: Tab) -> Bool {
         // A tab holding an extension's sign-in answer (Tab.hold) carries its
         // code in the address: that is never written down.
-        !tab.shy && !tab.bench && tab.held == nil && (tab.pending ?? tab.address)?.scheme?.hasPrefix("http") == true
+        !tab.shy && !tab.bench && tab.held == nil
+            && ((tab.pending ?? tab.address)?.scheme?.hasPrefix("http") == true || tab.page != nil)
     }
 
     /// Another space's row. Its groups are the ones in its own file, the
     /// only place a space off screen keeps them: written without them, the
     /// space would lose every group it had.
-    private func writeSession(now: Bool, space: UUID, row: Parked) {
+    func writeSession(now: Bool, space: UUID, row: Parked) {
         let groups = row.groups ?? readRow(space).groups
         writeRow(space, session(row.tabs, active: row.active, groups: groups, splits: row.splits), now: now)
     }
+
+    /// The session written a moment from now, for other files.
+    func writeSessionSoon() { rememberSession() }
 
     private func rememberSession() {
         guard !remembering else { return }
@@ -2601,6 +3099,8 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func startSplit() {
+        // Two tabs picked in the column: those two side by side.
+        if pickedPair != nil { return pairPickedTabs() }
         guard prefs.splitView, let shown = active, !shown.bench else { return }
         if let pair = activeSplit {
             if let right = tabs.first(where: { $0.id == pair.right }) { focusPane(right) }
@@ -2683,6 +3183,49 @@ final class Browser: NSObject, ObservableObject {
         guard split(for: tab)?.contains(current.id) != true else { return focusPane(tab) }
         guard canSplit(tab, with: current) else { return }
         pair(tab, with: current, onLeft: false)
+    }
+
+    /// The tabs picked in the column (⌘- or ⇧-click) that are shown, in the
+    /// column's order.
+    private var pickedTabs: [Tab] {
+        selectableTabs.filter { selectedTabIDs.contains($0.id) }
+    }
+
+    /// Exactly two tabs picked, and already the two pages of one pair.
+    var pickedTabsArePaired: Bool {
+        let picked = pickedTabs
+        return picked.count == 2 && split(for: picked[0])?.contains(picked[1].id) == true
+    }
+
+    /// Exactly two tabs picked that can go side by side: what Open 2 Tabs in
+    /// Split View and ⌥⌘N pair. More than two isn't a pair — Split View holds
+    /// two pages — so the menu's item is off then and ⌥⌘N does what it does
+    /// without a selection.
+    var pickedPair: (left: Tab, right: Tab)? {
+        let picked = pickedTabs
+        guard prefs.splitView, picked.count == 2, !pickedTabsArePaired,
+              canSplit(picked[0], with: picked[1]) else { return nil }
+        return (picked[0], picked[1])
+    }
+
+    /// The two picked tabs side by side, the first in the column on the
+    /// left. Both keep their pages (nothing loads again); either one in
+    /// another pair leaves it first, as a drag onto a page's edge does; a
+    /// pin stays a pin and its page goes in as a tab (see splittable). The
+    /// pair lands where the left one was — where the right one was when the
+    /// left is a pin — and the tab asked from has the keys. The selection
+    /// is done with.
+    func pairPickedTabs(focus asked: Tab? = nil) {
+        guard let (left, right) = pickedPair else { return }
+        clearTabSelection()
+        if left.pin != nil && right.pin == nil {
+            pair(left, with: right, onLeft: true)
+        } else {
+            pair(right, with: left, onLeft: false)
+        }
+        if let asked, let made = split(for: asked), activeSplit?.id == made.id {
+            focusPane(asked)
+        }
     }
 
     /// The divider's menu › Swap Pages.
@@ -2821,6 +3364,10 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func newTab() {
+        if websitePopup {
+            if active?.shy == true { tabDestination.newShyTab() } else { tabDestination.newTab() }
+            return
+        }
         // On a private tab, a new one is private too: ⌘T from a page that
         // keeps nothing and landing on one that keeps everything is how a
         // private search ends up in the history.
@@ -2838,14 +3385,10 @@ final class Browser: NSObject, ObservableObject {
             Extensions.shared.offerNewTabPage(into: tab)
             return
         }
-        // Never two empty tabs. One already open anywhere in the row comes to
-        // its end and is the one opened, with whatever was typed into it and
-        // never gone to cleared away — a row of identical empty tabs is what
-        // pressing ⌘T twice, or holding it, used to leave.
+        // Reuse an empty tab at the chosen position, clearing its draft:
+        // repeated ⌘T must not leave a row of identical empty tabs.
         if let blank = tabs.last(where: { $0.isBlank && !$0.bench && !$0.shy && split(for: $0) == nil }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
-            }
+            placeBlank(blank)
             if activeID != blank.id { leaving() }
             activeID = blank.id
             summoning = false
@@ -2860,7 +3403,8 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(configuration: Web.configuration(space: spaceID))
-        adopt(tab)
+        prepare(tab)
+        tabs.insert(tab, at: placeForFront())
         leaving()
         activeID = tab.id
         summoning = false
@@ -2886,14 +3430,14 @@ final class Browser: NSObject, ObservableObject {
         if activeID == tab.id { activeID = page.id; editing = false }
     }
 
-    func select(_ tab: Tab, floatPrevious: Bool = true) {
+    func select(_ tab: Tab, floatPrevious: Bool = true, unfoldGroup: Bool = true) {
         if let pair = split(for: tab), activeSplit?.id == pair.id, activeID != tab.id {
             focusPane(tab)
             return
         }
         // A folded group opens for the tab you go to in it. With groups off,
         // they are kept as they were and nothing about them is saved.
-        if prefs.usesTabGroups, let id = tab.groupID,
+        if unfoldGroup, prefs.usesTabGroups, let id = tab.groupID,
            let index = tabGroups.firstIndex(where: { $0.id == id }), tabGroups[index].collapsed {
             tabGroups[index].collapsed = false
             writeSession(now: true)
@@ -2916,6 +3460,7 @@ final class Browser: NSObject, ObservableObject {
         // Coming back to the tab whose video is out brings it home first, so
         // it is never lifted and landed in the same breath.
         if floating == tab.id { land() }
+        if pictured == tab.id { unpicture() }
         if floatPrevious { leaving() }
         activeID = tab.id
         tab.touch()
@@ -2932,10 +3477,9 @@ final class Browser: NSObject, ObservableObject {
         typed = tab.isBlank ? tab.draft : ""
     }
 
-    /// ⌘W closes what is in front: a peek, then a panel over the page
-    /// (Settings, History and the rest), then the tab. In Chrome these
-    /// panels are tabs, and ⌘W on one closes it; closing the page behind it
-    /// instead took the one thing you couldn't see. Escape puts things away
+    /// ⌘W closes what is in front: a peek, then a card over the page (What's
+    /// New), then the tab. Settings, History and the rest are tabs of their
+    /// own, as in Chrome, and ⌘W on one closes it. Escape puts things away
     /// in the same order, so the two keys agree on what is in front.
     func closeFront() {
         // The floating new tab is the thing in front: ⌘W takes it away and
@@ -2946,17 +3490,17 @@ final class Browser: NSObject, ObservableObject {
         else if let tab = active { close(tab) }
     }
 
+    /// ⇧⌘W: the whole window, its tabs with it, as the red button closes it.
+    func closeWindow() {
+        window?.performClose(nil)
+    }
+
     /// The panel over the page put away, if one is up — for ⌘W and Escape
     /// both. Whether there was one.
     func closePanel() -> Bool {
-        if notesShowing { notesShowing = false }
-        else if newsShowing { newsShowing = false }
-        else if tuning { tuning = false }
-        else if bookmarking { bookmarking = false }
-        else if managing { managing = false }
-        else if bringingIn != nil { bringingIn = nil }
-        else if recalling { recalling = false }
-        else if hoarding { hoarding = false }
+        // Settings, History and the rest are tabs now (InternalPages.swift):
+        // ⌘W closes them as it closes any tab, and Escape leaves them be.
+        if newsShowing { newsShowing = false }
         else { return false }
         return true
     }
@@ -2974,13 +3518,16 @@ final class Browser: NSObject, ObservableObject {
         // A tab whose page is out in the little window takes the window with
         // it. Left alone, the window would go on holding a page belonging to a
         // tab that no longer exists.
-        if floating == tab.id { land() }
+        if floating == tab.id { land(covering: false) }
 
         // A pinned tab is not closed by ⌘W — it is put down. The letter keeps
         // its place, the page is let go, and you land on whatever you were
         // looking at before. Only Unpin takes it out of the row.
         if tab.pin != nil {
-            tab.rest(at: prefs.pinsGoHome ? tab.home : nil)
+            // Put down is also gone home with Settings › Tabs › Pins stay on
+            // their site, as Arc's pins are: the pin wakes on the page it was
+            // pinned at, not wherever its links had taken it.
+            tab.rest(at: prefs.pinsGoHome || prefs.pinsPeek ? tab.home : nil)
             // Ordinary tabs first. Falling back to the most recent tab of any
             // kind meant closing one pin landed you on another pin, and ⌘W
             // bounced between the two instead of getting you out of them.
@@ -3295,12 +3842,69 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
+    /// Group menu › Move Group to Space: every tab of a group, in its order,
+    /// into another space, where it is the same group — its name, folded or
+    /// not — after that space's own groups. As Move to Space for one tab: a
+    /// space with other sign-ins asks first only when a page has unsaved
+    /// form entries, once for the group.
+    func move(group id: UUID, toSpace target: UUID) {
+        guard prefs.usesSpaces, target != spaceID,
+              let destination = spaces.first(where: { $0.id == target }),
+              let group = tabGroups.first(where: { $0.id == id })
+        else { return }
+        let members = tabs.filter { $0.groupID == id && $0.pin == nil && !$0.bench
+            && $0.address.flatMap({ Browser.extensionHost(of: $0) }) == nil }
+        guard !members.isEmpty else { return }
+        let from = spaceID
+        let complete: () -> Void = { [weak self] in
+            guard let self, self.spaceID == from else { return }
+            self.finishGroupMove(group, members.filter { tab in self.tabs.contains { $0.id == tab.id } }, to: destination)
+        }
+        let store = Spaces.store(for: target)
+        guard members.contains(where: { !$0.shy && $0.store !== store }) else { return complete() }
+        // Any page with something typed and not sent, asked once.
+        var unsaved = false
+        let asked = DispatchGroup()
+        for tab in members where !tab.shy && tab.store !== store {
+            asked.enter()
+            tab.unsaved { if $0 { unsaved = true }; asked.leave() }
+        }
+        asked.notify(queue: .main) {
+            guard unsaved else { return complete() }
+            Ask.sure(
+                "Move Group?",
+                detail: "A page in this group has unsaved form entries. The group will reopen in “\(destination.name)” with that Space’s sign-ins, so the entries may be lost.",
+                confirm: "Move",
+                then: complete
+            )
+        }
+    }
+
+    private func finishGroupMove(_ group: TabGroup, _ members: [Tab], to destination: Space) {
+        guard !members.isEmpty else { return }
+        // The tab on screen goes with the group: the one after the group
+        // comes to the front instead, or the one before it, not each of the
+        // group's tabs in turn on the way out.
+        if let activeID, members.contains(where: { $0.id == activeID }) {
+            let ids = Set(members.map(\.id))
+            let at = tabs.firstIndex { $0.id == activeID } ?? 0
+            let after = tabs[at...].first { !ids.contains($0.id) && standsInRow($0) }
+            let before = tabs[..<at].last { !ids.contains($0.id) && standsInRow($0) }
+            if let next = after ?? before { select(next, floatPrevious: false) }
+        }
+        for tab in members { finishMove(tab, toSpace: destination.id, group: group, quietly: true) }
+        writeSession(now: true)
+        if let row = parked[destination.id] { writeSession(now: true, space: destination.id, row: row) }
+        announce("Moved \(group.name) to \(destination.name)")
+    }
+
     @discardableResult
-    private func finishMove(_ tab: Tab, toSpace id: UUID) -> Bool {
+    private func finishMove(_ tab: Tab, toSpace id: UUID, group: TabGroup? = nil, quietly: Bool = false) -> Bool {
         guard prefs.usesSpaces, id != spaceID,
               let destination = spaces.first(where: { $0.id == id }),
               let index = tabs.firstIndex(where: { $0.id == tab.id })
         else { return false }
+        if let web = tab.built { cancelDisplay(for: web) }
         let partner = split(for: tab).flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         detachSplit(tab)
 
@@ -3320,9 +3924,15 @@ final class Browser: NSObject, ObservableObject {
         if tabs.isEmpty { adopt(Tab(configuration: Web.configuration(space: spaceID))) }
 
         tab.rehome(in: id)
-        // Its group stays behind: the space it goes to has groups of its own.
-        tab.groupID = nil
+        // Its group stays behind: the space it goes to has groups of its own
+        // — unless the whole group is going (Move Group to Space).
+        tab.groupID = group?.id
         var row = parked[id] ?? loadRow(id)
+        if let group {
+            var groups = row.groups ?? readRow(id).groups ?? []
+            if !groups.contains(where: { $0.id == group.id }) { groups.append(group) }
+            row.groups = groups
+        }
         // A pin is that space's pin from now on, in pins.json too: kept only
         // in its row, the next look at the space's pins (another window's
         // change, a change to the shared pins, or a relaunch before the space
@@ -3339,6 +3949,7 @@ final class Browser: NSObject, ObservableObject {
         if row.active == nil { row.active = tab.id }
         parked[id] = row
 
+        guard !quietly else { return true }
         writeSession(now: true)
         writeSession(now: true, space: id, row: row)
         announce("Moved to \(destination.name)")
@@ -3353,8 +3964,11 @@ final class Browser: NSObject, ObservableObject {
     /// reopens with those, as Move to Space does. Not a pin: pins are
     /// already in every window.
     func moveToWindow(_ tab: Tab, _ target: Browser?, at point: NSPoint? = nil) {
+        guard target?.isPopup != true else { return }
         guard tab.pin == nil, !tab.bench, target !== self, tabs.contains(where: { $0.id == tab.id }),
-              target != nil || tabs.count > 1 || !tab.isBlank
+              target != nil || tabs.count > 1 || !tab.isBlank,
+              // A window of another profile is another browser: never there.
+              target.map({ $0.profileID == profileID }) ?? true
         else { return }
         let destination = target ?? Browser(record: WindowRecord(space: spaceID))
         detach(tab)
@@ -3380,7 +3994,7 @@ final class Browser: NSObject, ObservableObject {
         guard tab.pin == nil, !tab.bench, let window,
               !window.frame.insetBy(dx: -12, dy: -12).contains(point)
         else { return false }
-        let over = Browsers.all.first { $0 !== self && $0.isOpen && $0.window?.frame.contains(point) == true }
+        let over = Browsers.all.first { $0 !== self && $0.isOpen && !$0.isPopup && $0.profileID == profileID && $0.window?.frame.contains(point) == true }
         guard over != nil || tabs.count > 1 else { return false }
         // After the drag has let go, not inside it.
         DispatchQueue.main.async { [weak self] in self?.moveToWindow(tab, over, at: point) }
@@ -3390,6 +4004,7 @@ final class Browser: NSObject, ObservableObject {
     /// Out of this row, not closed: it is on its way to another window.
     private func detach(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        if let web = tab.built { cancelDisplay(for: web) }
         let partner = split(for: tab).flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         detachSplit(tab)
         if floating == tab.id { land() }
@@ -3499,6 +4114,45 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
+    /// Insert relative to a visible member, after removing the carried item.
+    /// Assign the completed row once: tabs' normalization must not see a half move.
+    func move(_ tab: Tab, toGroup target: GroupDropTarget, detaching: Bool = false) {
+        guard tabs.contains(where: { $0 === tab }),
+              let groupIndex = tabGroups.firstIndex(where: { $0.id == target.group }) else { return }
+        let moving = (detaching ? nil : split(for: tab)).map { pair in
+            pair.tabs.compactMap { id in tabs.first { $0.id == id } }
+        } ?? [tab]
+        guard moving.allSatisfy({ $0.pin == nil && !$0.shy && !$0.bench }) else { return }
+        let ids = Set(moving.map(\.id))
+        var anchor: Tab?
+        if let member = target.member {
+            guard let found = tabs.first(where: { $0.id == member }),
+                  found.groupID == target.group, found.pin == nil, !found.shy, !found.bench else { return }
+            if ids.contains(member) { return }
+            let pair = split(for: found).flatMap { pair in
+                detaching && pair.contains(tab.id) ? nil : pair
+            }
+            let anchorID = target.after ? pair?.right : pair?.left
+            anchor = anchorID.flatMap { id in tabs.first { $0.id == id } } ?? found
+        }
+        var row = tabs.filter { !ids.contains($0.id) }
+        let insertion: Int
+        if let anchor, let index = row.firstIndex(where: { $0 === anchor }) {
+            insertion = index + (target.after ? 1 : 0)
+        } else {
+            insertion = row.lastIndex(where: { $0.groupID == target.group }).map { $0 + 1 }
+                ?? row.firstIndex(where: { $0.pin == nil }) ?? row.count
+        }
+        let previous = Set(moving.compactMap(\.groupID))
+        if detaching { detachSplit(tab) }
+        for member in moving { member.groupID = target.group }
+        row.insert(contentsOf: moving, at: insertion)
+        tabGroups[groupIndex].collapsed = false
+        tabs = row
+        for id in previous where id != target.group { removeEmptyGroup(id) }
+        writeSession(now: true)
+    }
+
     /// Reorder only among peers in the displayed section. The underlying
     /// tab row remains flat for keyboard shortcuts and the top strip.
     func move(_ tab: Tab, within group: UUID?, to index: Int) {
@@ -3563,13 +4217,41 @@ final class Browser: NSObject, ObservableObject {
     }
 
     /// The tabs as they are on screen: with groups on, the ones folded away
-    /// in a group are not among them. ⌘1–9 and ⌃Tab count these, so the key
-    /// goes to the tab you see in that place, never to one you can't.
+    /// in a group are not among them. Tab cycling and selection ranges count
+    /// these; number shortcuts also give folded groups a place of their own.
     var shownTabs: [Tab] {
         guard prefs.usesTabGroups else { return displayedTabs }
         return displayedTabs.filter { $0.pin != nil }
             + tabGroups.flatMap { visibleTabs(in: $0) }
             + tabs(in: nil).filter(standsInRow)
+    }
+
+    /// Number shortcuts count a folded group once, even while its active tab
+    /// is shown below its heading. Other tab navigation keeps using shownTabs.
+    var tabShortcutTargets: [(id: UUID, tab: Tab)] {
+        let row = displayedTabs
+        guard prefs.usesTabGroups else { return row.map { ($0.id, $0) } }
+        let groups = tabGroups.flatMap { group -> [(id: UUID, tab: Tab)] in
+            let members = tabs(in: group.id).filter(standsInRow)
+            guard group.collapsed else { return members.map { ($0.id, $0) } }
+            let current = active.flatMap { self.group(of: $0) == group.id ? $0 : nil }
+            guard let tab = current ?? members.max(by: { $0.touched < $1.touched }) else { return [] }
+            return [(group.id, tab)]
+        }
+        return row.filter { $0.pin != nil }.map { ($0.id, $0) }
+            + groups
+            + tabs(in: nil).filter(standsInRow).map { ($0.id, $0) }
+    }
+
+    @Published var commandHeld = false
+
+    /// Only nine hints, worked out once for the window rather than by each tab.
+    var tabShortcutNumbers: [UUID: Int] {
+        guard prefs.showsTabShortcuts, commandHeld else { return [:] }
+        let shown = tabShortcutTargets
+        var numbers = Dictionary(uniqueKeysWithValues: shown.prefix(8).enumerated().map { ($0.element.id, $0.offset + 1) })
+        if shown.count > 8, let last = shown.last { numbers[last.id] = 9 }
+        return numbers
     }
 
     func clearTabSelection() {
@@ -3648,22 +4330,89 @@ final class Browser: NSObject, ObservableObject {
         return focused
     }
 
-    /// ⌘1–8: the tab in that place on screen.
+    /// ⌘1–8: a tab or folded group in that place, without unfolding it.
+    /// With Settings › Tabs › A pin's number again goes back, the number of
+    /// the pin you're on takes you back to the tab you were on before it.
     func select(index: Int) {
-        let shown = shownTabs
-        guard shown.indices.contains(index) else { return }
-        select(entry(shown[index]))
+        let targets = tabShortcutTargets
+        guard targets.indices.contains(index) else { return }
+        let tab = entry(targets[index].tab)
+        if prefs.pinNumberGoesBack, tab.pin != nil, activeID == tab.id, let back = tabBefore(tab) {
+            select(back)
+            return
+        }
+        select(tab, unfoldGroup: false)
     }
 
-    /// ⌃Tab with the switcher on: the space's tabs, the most recently used
-    /// first. Nothing changes until ⌃ is let go of (`commitTabSwitch`).
+    /// The tab last left that is still in the row, other than `tab`.
+    func tabBefore(_ tab: Tab) -> Tab? {
+        let row = tabs.filter(standsInRow)
+        guard let id = tabSwitcher.lastLeft(among: Set(row.map(\.id)), other: tab.id) else { return nil }
+        return row.first { $0.id == id }
+    }
+
+    /// ⌃Tab: the space's tabs, the most recently used first, and the small
+    /// windows beside them. Nothing changes until ⌃ is let go of
+    /// (`commitTabSwitch`).
     func switchTabs(backwards: Bool) {
         guard let activeID else { return }
-        // A pair once, under its first page, pictured with its other one.
-        tabSwitcher.partners = prefs.splitView
-            ? Dictionary(splits.map { ($0.left, $0.right) }, uniquingKeysWith: { first, _ in first }) : [:]
+        tabSwitcher.partners = switcherPartners
         tabSwitcher.step(row: tabs.filter(standsInRow).map(\.id), current: activeSplit?.left ?? activeID,
-                         backwards: backwards)
+                         backwards: backwards, moons: LittleWindow.stacked)
+    }
+
+    /// A pair once, under its first page, pictured with its other one.
+    var switcherPartners: [Tab.ID: Tab.ID] {
+        prefs.splitView ? Dictionary(splits.map { ($0.left, $0.right) }, uniquingKeysWith: { first, _ in first }) : [:]
+    }
+
+    /// The row as the switcher's grid shows it, for a small window's
+    /// switcher to show as its planet (see TabSwitcher.ordered).
+    var switcherPlanet: [Tab.ID] {
+        tabSwitcher.ordered(row: tabs.filter(standsInRow).map(\.id), current: activeSplit?.left ?? activeID)
+    }
+
+    /// A letter pressed on a card while a switcher is up (see
+    /// TabSwitcher.Action): the card's tab, or its small window, as its ⌘
+    /// key would have it. `switcher` is the one the card is in, this
+    /// window's or a small window's.
+    func act(_ action: TabSwitcher.Action, onCard id: Tab.ID, in switcher: TabSwitcher) {
+        if let little = LittleWindow.holding(id) { return little.act(action, in: switcher) }
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        // A pair is one card: what's done to it is done to both its pages.
+        let partner = switcher.partners[id].flatMap { other in tabs.first { $0.id == other } }
+        switch action {
+        case .close:
+            // A pin not on screen is put down where it is and keeps its
+            // card, as ⌘W puts one down, without taking you anywhere.
+            if tab.pin != nil, id != activeID, partner == nil {
+                tab.rest()
+                writeSession(now: true)
+                return switcher.redraw()
+            }
+            switcher.remove(id)
+            close(tab)
+            if let partner { close(partner) }
+        case .reload:
+            tab.reload()
+            partner?.reload()
+        case .mute:
+            tab.toggleMute()
+            partner?.toggleMute()
+            switcher.redraw()
+        case .keep:
+            break
+        }
+    }
+
+    /// A tab picked in a small window's switcher: that tab, in this window,
+    /// in front. A test run goes to the tab and puts nothing on a screen.
+    func bringForward(_ id: Tab.ID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        select(entry(tab))
+        guard !Store.testing, let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// A click while the switcher is up, at a point in the window's own
@@ -3673,20 +4422,26 @@ final class Browser: NSObject, ObservableObject {
     /// a ⌃-click is a right-click to AppKit, not a click the card's button
     /// can be counted on to take. From #358, by oddharsh.
     func clickTabSwitcher(at point: CGPoint) -> Bool {
-        guard tabSwitcher.visible else { return false }
-        guard tabSwitcher.panelFrame.contains(point) else {
-            tabSwitcher.cancel()
-            return true
-        }
-        // Between two cards: the switcher's, and nothing happens.
-        if let id = tabSwitcher.card(at: point) { commitTabSwitch(picking: id) }
-        return true
+        tabSwitcher.click(at: point) { commitTabSwitch(picking: $0) }
     }
 
     func commitTabSwitch(picking id: Tab.ID? = nil) {
-        guard let target = tabSwitcher.finish(picking: id),
-              let tab = tabs.first(where: { $0.id == target }) else { return }
-        select(entry(tab))
+        guard let target = tabSwitcher.finish(picking: id) else { return }
+        if let tab = tabs.first(where: { $0.id == target }) {
+            select(entry(tab))
+        } else {
+            // A moon: its small window comes forward, and the row stays as
+            // it was. Open in Search is still what moves it in.
+            LittleWindow.holding(target)?.front()
+        }
+    }
+
+    /// A popup has one page; links that need tabs return to its Space.
+    private var tabDestination: Browser {
+        guard websitePopup else { return self }
+        let destination = Browsers.ensureWindow()
+        destination.switchSpace(to: spaceID)
+        return destination
     }
 
     /// A link opened from a page lands next to the page it came from, not at
@@ -3704,6 +4459,12 @@ final class Browser: NSObject, ObservableObject {
     /// may be waiting on its page.
     @discardableResult
     func open(_ url: URL, foreground: Bool, atEnd: Bool = false, from source: Tab? = nil, mayWait: Bool = false) -> Tab {
+        if websitePopup {
+            return tabDestination.open(url, foreground: foreground, atEnd: atEnd, from: source ?? active, mayWait: mayWait)
+        }
+        // One of Search's own pages, from a link, a script or another app:
+        // its own tab, one of each (see InternalPages.swift).
+        if let own = InternalPage(url: url) { return show(own) }
         // An extension's own page is served only to a view built from that
         // extension's configuration.
         let url = Browser.page(url)
@@ -3838,7 +4599,7 @@ final class Browser: NSObject, ObservableObject {
     /// exception, since nothing is lost by using it. With ⌘ it opens behind.
     func openBookmark(_ url: URL) {
         let behind = NSApp.currentEvent?.modifierFlags.contains(.command) ?? false
-        if !behind, let active, active.isBlank, active.pin == nil, !active.floating {
+        if !behind, let active, active.isBlank || active.page?.kind == .bookmarks, active.pin == nil, !active.floating {
             navigateInternal(url, in: active)
             editing = false
             typed = ""
@@ -3855,7 +4616,8 @@ final class Browser: NSObject, ObservableObject {
     func pickBookmark(_ url: URL, inNewTab: Bool = false) {
         let foreground = !inNewTab || NSApp.currentEvent?.modifierFlags.contains(.shift) == true
         if foreground {
-            bookmarking = false
+            // From the Bookmarks tab, the bookmark opens in it, as Chrome's
+            // manager does; Back comes back to the list.
             bookmarksOpen = false
         }
         if inNewTab {
@@ -3865,15 +4627,65 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
+    /// Pages in a window of their own, in this window's space, the first in
+    /// front. The empty tab a new window starts with goes once they are in,
+    /// as it does for a window an extension opens. Used, for one, by the
+    /// bookmarks bar's Open in New Window and Open All in New Window.
+    func openInNewWindow(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let fresh = Browser(record: WindowRecord(space: spaceID))
+        for (index, url) in urls.enumerated() {
+            fresh.open(url, foreground: index == 0, atEnd: true, mayWait: true)
+        }
+        for blank in fresh.tabs where blank.isBlank && !blank.bench { fresh.close(blank) }
+        Browsers.open(fresh, frame: nil)
+    }
+
+    /// A page in a new tab, paired with the one on screen as a tab's Open in
+    /// Split View pairs it. Used, for one, by the bookmarks bar's Open in
+    /// Split View.
+    func openInSplit(_ url: URL) {
+        guard prefs.splitView else { return }
+        openInSplit(open(url, foreground: false, from: active))
+    }
+
+    /// A page in a tab that keeps nothing, as ⌘⇧N makes one, already on its
+    /// way there. Not `open(_:foreground:)`, whose tab is private only when
+    /// the one it comes from is. Used, for one, by the bookmarks bar's Open
+    /// in Private Tab.
+    func openShy(_ url: URL) {
+        let tab = Tab(shy: true)
+        adopt(tab)
+        tab.go(to: url)
+        leaving()
+        activeID = tab.id
+        typed = ""
+        editing = false
+    }
+
+    /// Pages in a tab group of their own, under `name`. A group made from a
+    /// tab's menu opens with its name ready to be typed; this one is named
+    /// already, so it doesn't. Used, for one, by the bookmarks bar's Open All
+    /// in Tab Group.
+    func openInTabGroup(_ urls: [URL], named name: String) {
+        guard prefs.usesTabGroups, !urls.isEmpty else { return }
+        let opened = urls.enumerated().map { index, url in
+            open(url, foreground: index == 0, atEnd: true, mayWait: true)
+        }
+        let id = addTabGroup(containing: opened[0])
+        renameTabGroup(id, to: name)
+        editingGroupID = nil
+        for tab in opened.dropFirst() { move(tab, toGroup: id) }
+    }
+
     /// ⌘⇧N. A tab that keeps nothing — its own cookies, its own sign-ins, no
     /// history, and no place in tomorrow's session.
     func newShyTab() {
+        if websitePopup { tabDestination.newShyTab(); return }
         // Never two empty private tabs, as ⌘T never makes two empty ones:
-        // one already open comes to the end of the row and is the one opened.
-        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
-            }
+        // one already open is moved to the chosen position.
+        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench && split(for: $0) == nil }) {
+            placeBlank(blank)
             if activeID != blank.id { leaving() }
             activeID = blank.id
             summoning = false
@@ -3884,7 +4696,8 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(shy: true)
-        adopt(tab)
+        prepare(tab)
+        tabs.insert(tab, at: placeForFront())
         leaving()
         activeID = tab.id
         summoning = false
@@ -3918,7 +4731,7 @@ final class Browser: NSObject, ObservableObject {
     /// layout and takes its whole current length. WebKit splits only a page
     /// taller than a PDF page can be (200 inches).
     func exportPDF() {
-        guard let tab = active, !tab.isBlank, let window = tab.web.window ?? self.window else { return }
+        guard let tab = active, tab.isWeb, let window = tab.web.window ?? self.window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
@@ -3937,7 +4750,7 @@ final class Browser: NSObject, ObservableObject {
     /// Keep the tab the save panel was opened for, even if another is active
     /// when it finishes. The bench passes the current tab without a panel.
     func exportPDF(_ tab: Tab, to file: URL, finished: ((Bool) -> Void)? = nil) {
-        guard !tab.isBlank else {
+        guard tab.isWeb else {
             finished?(false)
             return
         }
@@ -3956,7 +4769,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// ⌘P. The system's print sheet, where a paginated PDF can also be saved.
     func printPage() {
-        guard let tab = active, !tab.isBlank, let window = NSApp.keyWindow else { return }
+        guard let tab = active, tab.isWeb, let window = NSApp.keyWindow else { return }
         Browser.printing(tab.web).runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
@@ -3986,7 +4799,14 @@ final class Browser: NSObject, ObservableObject {
     func loadRow(_ space: UUID) -> Parked {
         let saved = readRow(space)
         var restored = restoreRow(saved, space: space, groups: saved.groups ?? [])
-        if restored.active == nil { restored.active = restored.tabs.first?.id }
+        // As restoreSession has it: nothing in front after a fresh start, so
+        // the space opens on an empty tab beside its pins (see enter); and a
+        // tab whose place no longer reads falls to the first that isn't a pin.
+        if saved.active < 0 {
+            restored.active = nil
+        } else if restored.active == nil {
+            restored.active = restored.tabs.first { $0.pin == nil }?.id ?? restored.tabs.first?.id
+        }
         restored.groups = saved.groups
         return restored
     }
@@ -4006,6 +4826,9 @@ final class Browser: NSObject, ObservableObject {
             let tab = Tab(configuration: Web.configuration(space: space))
             prepare(tab)
             tab.restore(url: url, title: url == saved ? entry.title : url.host ?? "", name: entry.name)
+            // Never later than now: a clock set wrong once would keep the tab forever.
+            if let touched = entry.touched { tab.touch(at: min(touched, Date())) }
+            tab.letGo = entry.letGo.map { min($0, Date()) }
             tab.pin = entry.pin
             tab.pinID = entry.pin == nil ? nil : entry.pinID
             tab.listed = entry.pin != nil && entry.listed == true
@@ -4036,9 +4859,12 @@ final class Browser: NSObject, ObservableObject {
 
     /// Another space's row put on screen in place of this one (see
     /// Spaces.swift) — empty, for one that restores its own.
-    func showRow(_ row: [Tab], active: Tab.ID?, splits restored: [TabSplit] = []) {
+    /// `blank`: with nothing in front, an empty tab is, rather than the
+    /// first of the row (see frontBlank).
+    func showRow(_ row: [Tab], active: Tab.ID?, splits restored: [TabSplit] = [], blank: Bool = false) {
         splits = restored
         tabs = row
+        if active == nil, blank { return frontBlank() }
         activeID = active ?? row.first?.id
     }
 
@@ -4052,11 +4878,25 @@ final class Browser: NSObject, ObservableObject {
     /// them. A link from another app, with a pin in front, landed between two
     /// (#219).
     func placeForNew() -> Int {
-        // Settings › Tabs › Open new tabs at the end.
+        if prefs.newTabPlace == .top { return pinnedCount }
         if prefs.newTabPlace == .end { return tabs.count }
         guard let here = tabs.firstIndex(where: { $0.id == activeID }) else { return tabs.count }
         let after = activeSplit.flatMap { pair in tabs.firstIndex { $0.id == pair.right } } ?? here
         return max(after + 1, pinnedCount)
+    }
+
+    /// Where ⌘T's tab goes, a private one, and a page a link opens in front
+    /// of you: the end of the row, as always, unless the top was chosen.
+    /// After current is for links opened from the tab you are on.
+    func placeForFront() -> Int {
+        prefs.newTabPlace == .top ? pinnedCount : tabs.count
+    }
+
+    private func placeBlank(_ tab: Tab) {
+        guard let from = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        let to = placeForFront()
+        // Moving an existing tab removes its old slot before inserting it.
+        move(tab, to: from < to ? to - 1 : to)
     }
 
     /// A tab made outside the row — a peek being kept — put in it at `index`.
@@ -4098,7 +4938,7 @@ final class Browser: NSObject, ObservableObject {
 
     func appLeft() {
         guard prefs.floatsAway, Browsers.front == nil || Browsers.front === self else { return }
-        liftedAway = !floater.showing
+        liftedAway = !floater.showing && pictured == nil
         lift(active, quietly: true, otherwise: otherPane)
     }
 
@@ -4106,6 +4946,7 @@ final class Browser: NSObject, ObservableObject {
     func appBack() {
         defer { liftedAway = false }
         if liftedAway, let id = floating, id == activeID { land() }
+        if liftedAway, let id = pictured, id == activeID { unpicture() }
     }
 
     /// ⌘⇧P, for lifting one out by hand.
@@ -4114,7 +4955,49 @@ final class Browser: NSObject, ObservableObject {
             land()
             return
         }
+        if prefs.floatStyle == .system {
+            picture(active, quietly: false, toggle: true, otherwise: otherPane)
+            return
+        }
         lift(active, quietly: false, otherwise: otherPane)
+    }
+
+    /// The tab whose video Search last sent to macOS's picture in picture
+    /// (Settings › General › The floating video), to bring back when you
+    /// return to it, as Search's own window lands.
+    private(set) var pictured: Tab.ID?
+
+    /// The video playing in `tab` into picture in picture (NativePiP).
+    /// `toggle`: ⇧⌘P, which also brings one back.
+    private func picture(_ tab: Tab?, quietly: Bool, toggle: Bool = false, otherwise: Tab? = nil) {
+        guard let tab, !tab.isBlank, !tab.asleep, tab.web.fullscreenState == .notInFullscreen else {
+            if let otherwise { picture(otherwise, quietly: quietly, toggle: toggle) }
+            return
+        }
+        if quietly, !Players.knows(tab.address) || tab.pageAddress?.host().map(Grounded.holds) == true {
+            if let otherwise { picture(otherwise, quietly: quietly, toggle: toggle) }
+            return
+        }
+        tab.web.evaluateInSearch(NativePiP.script(toggle: toggle)) { [weak self, weak tab] answer in
+            MainActor.assumeIsolated {
+                guard let self, let tab else { return }
+                switch answer as? String {
+                case "in": self.pictured = tab.id
+                case "out": if self.pictured == tab.id { self.pictured = nil }
+                case "refused": if !quietly { self.announce("This page keeps its video to itself") }
+                default:
+                    if let otherwise { return self.picture(otherwise, quietly: quietly, toggle: toggle) }
+                    if !quietly { self.announce("Nothing is playing here") }
+                }
+            }
+        }
+    }
+
+    /// Back into its tab, from macOS's picture in picture.
+    func unpicture() {
+        guard let id = pictured else { return }
+        pictured = nil
+        tabs.first { $0.id == id }?.web.evaluateInSearch(NativePiP.off)
     }
 
     /// Everything but the video goes out of the way, and the page it lives in
@@ -4122,9 +5005,10 @@ final class Browser: NSObject, ObservableObject {
     /// `otherwise`: the other page of a pair, tried when this one has
     /// nothing playing.
     private func lift(_ tab: Tab?, quietly: Bool, otherwise: Tab? = nil) {
+        if prefs.floatStyle == .system { return picture(tab, quietly: quietly, otherwise: otherwise) }
         // A tab just put down with ⌘W has no page to lift a video out of, and
         // asking it would only build an empty view to ask.
-        guard let tab, !tab.isBlank, !tab.asleep, !floater.showing else {
+        guard let tab, tab.isWeb, !tab.asleep, !floater.showing else {
             if let otherwise { lift(otherwise, quietly: quietly) }
             return
         }
@@ -4141,36 +5025,122 @@ final class Browser: NSObject, ObservableObject {
             if let otherwise { lift(otherwise, quietly: quietly) }
             return
         }
-        tab.web.evaluateInSearch(Isolate.on) { [weak self] answer in
+        // A picture of the page as it is, asked for in the same breath as the
+        // isolation and before it: the page's process answers in the order
+        // it is asked, so the picture is of the page before anything moved.
+        // Isolating only once the picture is back would be a tenth of a
+        // second late, and a muted video, which WebKit stops when nobody can
+        // see it, might no longer be playing. The video's frame in the
+        // picture covers the little window, and the whole of it the tab when
+        // the video lands, each until the page has settled there.
+        //
+        // At no more than a million and a bit pixels, the size of the page in
+        // points or less: WebKit paints a picture of a page on the processor,
+        // and one of the whole page at a Retina screen's size took half a
+        // second (YouTube, 1412×728 points: 480 ms; 110 ms at one pixel a
+        // point). The video's frame is cut from it at about the little
+        // window's size anyway, and the tab's picture is up for a moment.
+        let shape = tab.web.bounds.size
+        let fine = tab.web.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let most = (1_200_000 * shape.width / max(shape.height, 1)).squareRoot()
+        let picture = WKSnapshotConfiguration()
+        picture.afterScreenUpdates = false
+        picture.snapshotWidth = NSNumber(value: Double(min(shape.width, most) / fine))
+        var shot: NSImage??
+        var found: Any??
+        // Going to another tab, the stage holds on to this page, unseen,
+        // until it is in the little window or has nothing to float.
+        let stage = tab.web.superview as? StageView
+        stage?.keep(tab.web)
+        func both() {
+            guard let shot, let found else { return }
+            lifted(tab, shot: shot, found: found, quietly: quietly, otherwise: otherwise)
+            stage?.letGo(tab.web)
+        }
+        tab.web.takeSnapshot(with: picture) { image, _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                guard (answer as? String) == "floating" else {
-                    if let otherwise { return self.lift(otherwise, quietly: quietly) }
-                    if !quietly { self.announce("Nothing is playing here") }
-                    return
-                }
-                self.floating = tab.id
-                tab.floating = true
-                self.ownFloater()
-                self.floater.lift(tab.web)
+                shot = .some(image)
+                both()
+            }
+        }
+        tab.web.evaluateInSearch(Isolate.on) { answer in
+            MainActor.assumeIsolated {
+                found = .some(answer)
+                both()
             }
         }
     }
 
+    /// The page isolated, or not, and pictured as it was before: into the
+    /// little window, or on to the other page of a pair.
+    private func lifted(_ tab: Tab, shot: NSImage?, found answer: Any?, quietly: Bool, otherwise: Tab?) {
+        guard let found = answer as? [String: Any], found["floating"] as? Bool == true else {
+            if let otherwise { return lift(otherwise, quietly: quietly) }
+            if !quietly { announce("Nothing is playing here") }
+            return
+        }
+        // Out again before it had settled in its tab: the page isn't as it
+        // was left yet, and the picture from the first time still is.
+        var left = shot
+        if landed?.tab == tab.id {
+            left = landed?.picture
+            landing.end()
+        }
+        leftAs = left.map { (tab.id, $0) }
+        floating = tab.id
+        tab.floating = true
+        ownFloater()
+        let still = shot.flatMap { shot in
+            Float.still(
+                of: shot,
+                picture: (found["picture"] as? [NSNumber] ?? []).map(\.doubleValue),
+                page: (found["page"] as? [NSNumber] ?? []).map(\.doubleValue)
+            )
+        }
+        floater.lift(tab.web, still: still)
+    }
+
+    /// The page as it was when its video went out, for covering the tab with
+    /// while it lands.
+    private var leftAs: (tab: Tab.ID, picture: NSImage)?
+    /// The tab covered now, and with what, until its page has settled.
+    private var landed: (tab: Tab.ID, picture: NSImage)?
+    private let landing = Settling()
+
     /// Back into its tab. The stage takes the page again on its next layout,
     /// which is what the self-healing there is for.
-    func land() {
+    ///
+    /// The tab shows the page as it was left until the page is that again
+    /// (see Isolate.off). Put back as it comes, it showed the video alone at
+    /// the little window's size, then the page around it, then the video
+    /// growing into its place. `covering`: false for a tab on its way out,
+    /// with nobody to see it land.
+    func land(covering: Bool = true) {
         // Another window's video: that window takes it back.
         if floating == nil, let owner = Browsers.all.first(where: { $0 !== self && $0.floating != nil }) {
-            return owner.land()
+            return owner.land(covering: covering)
         }
         // The window closes whatever else is true. Tying that to the bookkeeping
         // is how a little window outlives the thing that opened it.
         if floater.showing { floater.drop() }
+        let left = leftAs
+        leftAs = nil
         guard let id = floating, let tab = tabs.first(where: { $0.id == id }) else { return }
         floating = nil
+        // One landing at a time: one still settling elsewhere is uncovered now.
+        landing.end()
+        if covering, let left, left.tab == id {
+            tab.cover(with: left.picture)
+            landed = left
+        }
         tab.floating = false
         tab.web.evaluateInSearch(Isolate.off)
+        guard landed != nil else { return }
+        landing.watch(tab.web, within: 1.5) { [weak self, weak tab] in
+            guard let self, let landed = self.landed else { return }
+            self.landed = nil
+            tab?.uncover(landed.picture)
+        }
     }
 
     func prepare(_ tab: Tab) {
@@ -4216,9 +5186,12 @@ final class Browser: NSObject, ObservableObject {
         // From a private tab, the new one is private too, as for ⌘-click.
         tab.onMiddleClick = { [weak self] tab, url, download in
             if download { self?.open(url, foreground: false, from: tab, mayWait: true) }
-            else { self?.openInternal(url, foreground: false, from: tab, mayWait: true) }
+            else { self?.openClicked(url, foreground: false, from: tab, view: tab.built) }
         }
         tab.onCross = { [weak self] tab, url in self?.replace(tab, going: url) }
+        tab.onFileLink = { [weak self] tab, url, blank in
+            if blank { self?.open(url, foreground: true, from: tab) } else { tab.go(to: url) }
+        }
 
         // The caret in a sign-in box: the accounts kept for this site hang
         // from the box, and go when the caret does. Nothing is filled on
@@ -4235,9 +5208,12 @@ final class Browser: NSObject, ObservableObject {
             // A password manager extension that asked Chrome's way to do the
             // saving itself.
             if #available(macOS 15.4, *), Extensions.shared.passwordSavingTakenBy != nil { return }
-            let known = Vault.logins(for: host)
-            // Nothing to ask about one that is already known.
-            if var same = known.first(where: { $0.user == user && $0.password == password }) {
+            // Just filled from the Passwords app: it is kept there already.
+            if tab.appleFill?.matches(host: host, user: user, password: password) == true { return }
+            let known = Vault.kept(for: host)
+            // Nothing to ask about one that is already known. Only that
+            // account's secret is read, not every one kept for the site.
+            if var same = known.first(where: { $0.user == user }).flatMap(Vault.login), same.password == password {
                 // Where it was last used is where it is offered from now on.
                 same.clear = clear
                 Vault.touch(same)
@@ -4275,7 +5251,9 @@ final class Browser: NSObject, ObservableObject {
         tab.$title
             .dropFirst()
             .sink { [weak self, weak tab] title in
-                guard let tab, !tab.shy, let url = tab.address else { return }
+                // A translated title is the page's in your words, not its own:
+                // history keeps the page's (Translate.swift).
+                guard let tab, !tab.shy, tab.translator == nil, let url = tab.address else { return }
                 self?.history.retitle(url, title)
             }
             .store(in: &bag)
@@ -4283,6 +5261,44 @@ final class Browser: NSObject, ObservableObject {
 
     /// Put the cursor back in the field, from wherever asked.
     func askFocus() { focusRequest += 1 }
+
+    /// A key typed between ⌘T and the field taking the keys, kept for it.
+    ///
+    /// The field comes a turn or two of the run loop after it is asked for —
+    /// later still with Split View, where it waits for the stage to say where
+    /// the page is — and a hand already typing got there first: the first
+    /// letter or two went to the page being left, or nowhere. Held for half
+    /// a second at most, and only typing: a key with ⌘ or ⌃ is a shortcut.
+    func holdKey(_ event: NSEvent) -> Bool {
+        guard let asked = focusAsked, CACurrentMediaTime() - asked < 0.5,
+              fieldShowing, editingTab == nil,
+              event.modifierFlags.intersection([.command, .control]).isEmpty
+        else { return false }
+        if heldKeys.isEmpty {
+            // The field never came: what was typed goes where it would have.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.heldKeys.isEmpty else { return }
+                self.focusAsked = nil
+                self.letGo(in: event.window)
+            }
+        }
+        heldKeys.append(event)
+        return true
+    }
+
+    /// The field has the keys: what was held goes to it, in order.
+    func fieldFocused(in window: NSWindow) {
+        focusAsked = nil
+        letGo(in: window)
+    }
+
+    private func letGo(in window: NSWindow?) {
+        let held = heldKeys
+        heldKeys = []
+        // Straight to the window, which hands a key to whatever has the
+        // keys: not back through the app, whose monitor would hold it again.
+        for event in held { window?.sendEvent(event) }
+    }
 
     // MARK: - guessing
 
@@ -4312,6 +5328,11 @@ final class Browser: NSObject, ObservableObject {
     }
 
     private func guess() {
+        // Only a plain field asks the engine (see askEngine, at the end).
+        if summoning || siteChip != nil || typed.trimmingCharacters(in: .whitespaces).isEmpty {
+            suggester.stop()
+            engineWords = ("", [])
+        }
         guard !summoning else {
             offers = openPages(matching: typed)
             ending = nil
@@ -4341,13 +5362,73 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         // "red": Reddit's search, a Tab away.
-        let site = prefs.searchesSites && !summoning ? SiteSearch.match(typed) : nil
+        let site = prefs.searchesSites && !summoning ? SiteSearch.match(typed, learnedToo: profileID == Profile.personalID) : nil
         if siteOffer != site { siteOffer = site }
 
         (offers, ending) = placeOffers(for: typed)
         // A row that was picked stops being the right row the moment the
         // question changes.
         picked = nil
+        askEngine()
+    }
+
+    // MARK: - the engine's suggestions
+
+    /// Asks the engine for the words it would suggest, when Settings ›
+    /// General › Suggestions from your search engine is on and these words
+    /// may leave the Mac (EngineSuggest.sendable). What it said for the
+    /// words before stays, those that still fit, until it answers these:
+    /// rows that came and went with every key would be a list nobody could
+    /// read.
+    let suggester = EngineSuggester()
+    /// The engine's last words, and what they answered.
+    private var engineWords: (asked: String, words: [String]) = ("", [])
+
+    /// The question this field may ask the engine, or nil when it may not:
+    /// the switch off, a private tab, ⌘K, a site or a shortcut in charge,
+    /// or words that look like anything but a search.
+    func engineQuestion(for typed: String) -> URL? {
+        guard prefs.engineSuggests, !summoning, siteChip == nil, active?.shy != true,
+              EngineSuggest.sendable(typed),
+              Keyword.match(typed, in: prefs.keywords) == nil
+        else { return nil }
+        let words = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return EngineSuggest.url(for: words, engine: prefs.engine, test: EngineSuggest.testEndpoint)
+    }
+
+    private func askEngine() {
+        guard let question = engineQuestion(for: typed) else {
+            suggester.stop()
+            engineWords = ("", [])
+            return
+        }
+        let words = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Until the answer: last time's words that still begin with these.
+        let lower = words.lowercased()
+        let places = Set(offers.map { $0.key.lowercased() })
+        let still = engineWords.words.filter {
+            $0.lowercased().hasPrefix(lower) && $0.lowercased() != lower && !places.contains($0.lowercased())
+        }
+        if !still.isEmpty { offers += engineOffers(still) }
+        suggester.ask(question, words: words) { [weak self] answer in
+            guard let self else { return }
+            // Typed on since, or the field gone: nothing to answer.
+            guard self.typed.trimmingCharacters(in: .whitespacesAndNewlines) == words,
+                  self.fieldShowing, self.engineQuestion(for: self.typed) != nil
+            else { return }
+            let mine = self.offers.filter { $0.kind != .suggested }
+            // A row of the engine's that the arrow keys are on stays put.
+            if let picked = self.picked, picked >= mine.count { return }
+            self.engineWords = (words, answer)
+            let places = Set(mine.map { $0.key.lowercased() })
+            self.offers = mine + self.engineOffers(answer.filter { !places.contains($0.lowercased()) })
+        }
+    }
+
+    private func engineOffers(_ words: [String]) -> [Suggestion] {
+        words.prefix(EngineSuggest.most).compactMap { word in
+            searchURL(for: word).map { Suggestion(key: word, title: "", url: $0, kind: .suggested) }
+        }
     }
 
     /// What an address field offers for what is typed in it, and the rest of
@@ -4470,7 +5551,7 @@ final class Browser: NSObject, ObservableObject {
         launching = false
         // Never a name and password written into the address: they would be
         // on screen, and in whatever you copy from here.
-        typed = active?.address.map { url -> String in
+        typed = active?.shownURL.map { url -> String in
             guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.user != nil || parts.password != nil
             else { return url.absoluteString }
             parts.user = nil
@@ -4572,6 +5653,12 @@ final class Browser: NSObject, ObservableObject {
             refusals += 1
             return
         }
+        // search://settings and the rest: the page's own tab, one of each.
+        if let page = InternalPage(url: url) {
+            show(page)
+            picked = nil
+            return
+        }
         if launching, !aside {
             // The floating new tab: what was typed gets a tab of its own, and
             // the page the field was raised over stays as it was.
@@ -4593,6 +5680,75 @@ final class Browser: NSObject, ObservableObject {
     func resetZoom() { active?.resetZoom() }
 
     /// ⌘⇧R. The article, and nothing that was arranged around it.
+    // MARK: - dark pages
+
+    /// Whether ⇧⌘D has anything to do: on, not paused, and the frame dark,
+    /// since a light frame darkens nothing.
+    var canDusk: Bool { canDusk(active) }
+
+    /// The same for a given tab: the site card's, which in Split View can be
+    /// the page beside the one with the keys.
+    func canDusk(_ tab: Tab?) -> Bool {
+        prefs.darkensPages && !Dusk.shared.paused && Dusk.frameIsDark
+            && Dusk.host(of: tab?.pageAddress) != nil
+    }
+
+    /// ⇧⌘D: the site you're on, darkened or left as it is, the other way
+    /// from now. Kept for the site; in a private tab, for this page alone.
+    func toggleDusk() {
+        guard canDusk, let tab = active else { return }
+        dusk(!tab.dusked, tab)
+    }
+
+    func dusk(_ on: Bool, _ tab: Tab) {
+        guard let host = Dusk.host(of: tab.pageAddress) else { return }
+        if tab.shy {
+            tab.built?.evaluateInSearch(Dusk.shared.forced(for: host, on))
+        } else {
+            Dusk.shared.choose(on, for: host, native: tab.duskNative)
+        }
+    }
+
+    /// ⌥⇧⌘D: every page as its site made it, until pressed again or Search
+    /// quits. For showing someone a site the way they see it.
+    func pauseDusk() {
+        guard prefs.darkensPages else { return }
+        Dusk.shared.pause(!Dusk.shared.paused)
+        announce(Dusk.shared.paused ? "Pages as their sites made them, until ⌥⇧⌘D" : "Light pages darkened again")
+    }
+
+    /// The darkening as it now stands, into every tab's next page and the
+    /// page each is showing: taken over, let go, or, for a site not known
+    /// yet, looked at.
+    private func redusk() {
+        for tab in tabs + parkedTabs {
+            tab.arm(hiding: curtain.css(on: curtain.host(of: tab.address)))
+            guard let web = tab.built else { continue }
+            let host = Dusk.host(of: tab.pageAddress)
+            if Dusk.shared.unsure(host) { duskLook(tab) } else { web.evaluateInSearch(Dusk.shared.update(for: host)) }
+        }
+    }
+
+    /// A page on a site not known to be light, looked at from outside as it
+    /// is drawn (see Dusk.look). Light, and it is darkened now, and every
+    /// page of the site after it from its first frame; dark, and it is left
+    /// with nothing in it.
+    func duskLook(_ tab: Tab) {
+        guard let web = tab.built, let url = web.url, let host = Dusk.host(of: url),
+              Dusk.shared.unsure(host), !tab.dusked else { return }
+        Dusk.look(at: web) { [weak self, weak tab] dark in
+            MainActor.assumeIsolated {
+                guard let self, let tab, let dark, tab.built === web, web.url == url, Dusk.shared.unsure(host) else { return }
+                tab.duskNative = dark
+                // A private tab remembers nothing, not even this.
+                if !tab.shy { Dusk.shared.saw(host, dark: dark) }
+                guard !dark, let script = Dusk.shared.script(for: host, light: true) else { return }
+                web.evaluateInSearch(script)
+                tab.arm(hiding: self.curtain.css(on: self.curtain.host(of: tab.address)))
+            }
+        }
+    }
+
     func toggleReader() {
         guard let tab = active else { return }
         tab.toggleReader { [weak self] worked in
@@ -4627,7 +5783,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             }
             if policy == .allow, action.targetFrame?.isMainFrame ?? true, let url = action.request.url {
                 let shy = self?.tab(for: webView)?.shy == true || !webView.configuration.websiteDataStore.isPersistent
-                Autoplay.apply(to: preferences, for: url, shy: shy)
+                Autoplay.apply(to: preferences, for: url, shy: shy,
+                               made: webView.configuration.mediaTypesRequiringUserActionForPlayback)
             }
             decisionHandler(policy, preferences)
         }
@@ -4672,6 +5829,13 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         if action.targetFrame?.isMainFrame == true, let local = Address.reachable(url) {
             decisionHandler(.cancel)
             webView.load(URLRequest(url: local))
+            return
+        }
+
+        // An extension's rule sending a site to one of its pages (Norma's
+        // block page): that page needs another view too.
+        if #available(macOS 15.4, *), routeRuleRedirect(action, from: webView) {
+            decisionHandler(.cancel)
             return
         }
 
@@ -4725,15 +5889,34 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
                 return
             }
         }
-        // Shift-click, when Settings says so: a peek at the link, over this
+        // The chosen modified click: a peek at the link, over this
         // page (see Peek.swift). Only from a tab in the row — within a peek,
         // a link just goes.
         if prefs.peeksLinks, action.navigationType == .linkActivated,
            ["http", "https"].contains(scheme),
-           action.modifierFlags.intersection([.shift, .command, .option, .control]) == .shift,
+           action.modifierFlags.intersection([.shift, .command, .option, .control]) == prefs.peekClick.flags,
            let from = tab(for: webView), peekTab == nil {
             decisionHandler(.cancel)
             DispatchQueue.main.async { [weak self] in self?.peek(url, from: from) }
+            return
+        }
+        // A plain click in a pin, on a link to another site: a peek too, when
+        // Settings says so (see peeksFromPin). Links into the page's frames
+        // are the page's own business. A link the site sends out by way of
+        // itself, as Google's results go by google.com/goto, is asked about
+        // again at the redirect, still as a click — by then webView.url is
+        // already where it is going, so the page it was on is the one in the
+        // history.
+        if action.navigationType == .linkActivated, action.targetFrame?.isMainFrame == true,
+           action.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           let from = tab(for: webView), peeksFromPin(url, in: from, on: webView.backForwardList.currentItem?.url) {
+            decisionHandler(.cancel)
+            DispatchQueue.main.async { [weak self] in self?.peek(url, from: from) }
+            return
+        }
+        if action.navigationType == .other, action.targetFrame?.isMainFrame == true,
+           let from = tab(for: webView), followsPeek(url, in: from) {
+            decisionHandler(.cancel)
             return
         }
         if action.navigationType == .linkActivated,
@@ -4741,7 +5924,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
            action.modifierFlags.contains(.command) {
             if action.sourceFrame.isMainFrame, !action.shouldPerformDownload,
                (action.request.httpMethod ?? "GET").uppercased() == "GET" {
-                openInternal(url, foreground: action.modifierFlags.contains(.shift), from: tab(for: webView), mayWait: true)
+                openClicked(url, foreground: action.modifierFlags.contains(.shift), from: tab(for: webView), view: webView)
             } else {
                 open(url, foreground: action.modifierFlags.contains(.shift), from: tab(for: webView), mayWait: true)
             }
@@ -4753,9 +5936,14 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // decided here because here is the last moment before it loads.
         if action.targetFrame?.isMainFrame ?? true, let tab = tab(for: webView) {
             let host = curtain.host(of: url)
-            tab.arm(hiding: curtain.css(on: host))
+            tab.arm(hiding: curtain.css(on: host), to: url)
             // And the blocker, on or off for where it is going.
             Shield.shared.tune(webView.configuration.userContentController, for: host)
+            // The frames that were told about the last page's darkening go
+            // with it.
+            tab.duskFrames.removeAll()
+            // And the frames that played, and the count to the media keys.
+            tab.leaving()
         }
 
         // chrome-extension: an extension's own pages — options, a side
@@ -4780,12 +5968,30 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         return handOverExtensionReturn(target, source: source, from: webView, tab: tab)
     }
 
+    /// WebKit marks the navigation it starts for a content rule's redirect
+    /// (`_isContentExtensionRedirect`); a page can't. What a page could reach
+    /// is still all it gets: the file must be one the extension exposes to
+    /// the site the tab was going to, as Chrome requires of a redirect to an
+    /// extension's file.
     @available(macOS 15.4, *)
-    private func handOverExtensionReturn(_ target: URL, source: URL, from webView: WKWebView, tab: Tab) -> Bool {
+    private func routeRuleRedirect(_ action: WKNavigationAction, from webView: WKWebView) -> Bool {
+        guard action.targetFrame?.isMainFrame == true,
+              action.responds(to: NSSelectorFromString("_isContentExtensionRedirect")),
+              (action.value(forKey: "_isContentExtensionRedirect") as? Bool) == true,
+              let tab = tab(for: webView), let requested = action.request.url
+        else { return false }
+        let source = tab.extensionReturn.ruleSource(for: action)
+        let target = Extensions.current(ExtensionRedirectPolicy.ruleTarget(requested))
+        guard target.scheme == Extensions.scheme, let source else { return false }
+        return handOverExtensionReturn(target, source: source, from: webView, tab: tab, fromRule: true)
+    }
+
+    @available(macOS 15.4, *)
+    private func handOverExtensionReturn(_ target: URL, source: URL, from webView: WKWebView, tab: Tab, fromRule: Bool = false) -> Bool {
         guard !tab.shy,
               let context = Extensions.shared.controller.extensionContext(for: target),
               context.isLoaded, context.webViewConfiguration != nil,
-              ExtensionRedirectPolicy.allows(target: target, sourceOrigin: source, manifest: context.webExtension.manifest)
+              ExtensionRedirectPolicy.allows(target: target, sourceOrigin: source, manifest: context.webExtension.manifest, fromRule: fromRule)
         else { return false }
         let revision = tab.extensionReturn.revision
         DispatchQueue.main.async { [weak self, weak tab, weak webView] in
@@ -4798,6 +6004,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        cancelDisplay(for: webView)
         guard let navigation else { return }
         tab(for: webView)?.extensionReturn.started(navigation, at: webView.url)
     }
@@ -4868,8 +6075,20 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         for action: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        guard let opener = popupTab(for: webView),
-              opener.popupGesture.take(origin: PopupGesture.origin(action.sourceFrame), mainFrame: action.sourceFrame.isMainFrame) else { return nil }
+        guard let opener = popupTab(for: webView) else { return nil }
+        let clicked = opener.popupGesture.take(origin: PopupGesture.origin(action.sourceFrame), mainFrame: action.sourceFrame.isMainFrame)
+        if !clicked {
+            // A second window for a click that already had its one: the
+            // duplicate one click must not make, said nowhere.
+            if opener.popupGesture.spent() { return nil }
+            // No click just before: refused, and the tab says so (see
+            // BlockedPopups.swift), unless you allowed pop-ups from this site
+            // and it is the site's own page or frame asking.
+            guard popupsAllowed(opener, from: action.sourceFrame, top: opener.committed ?? webView.url) else {
+                opener.noteBlocked(action.request.url)
+                return nil
+            }
+        }
         let linkMenu = (webView as? PageView)?.takeLinkMenu() == true
         let behind = (webView as? PageView)?.takeBehind() == true
         if (action.navigationType == .linkActivated || linkMenu), action.sourceFrame.isMainFrame,
@@ -4882,6 +6101,10 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             }) { return nil }
         }
         let from = opener.id
+        // The link menu's Open Link in New Tab, asked for in the last second.
+        // Read once: reading it takes it.
+        let popup = windowFeatures.width != nil || windowFeatures.height != nil
+            || windowFeatures.toolbarsVisibility?.boolValue == false
         // WebKit's copy of the opener's configuration still holds the
         // opener's user content controller — its scripts and its message
         // handlers. Shared, the new tab claimed the opener's handlers as its
@@ -4889,25 +6112,75 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // right-click on a picture on X, after following a link out of it,
         // did nothing at all. Each tab gets a controller of its own.
         configuration.userContentController = WKUserContentController()
+        // The opener's copy is what its view was made with, maybe before
+        // Settings › Videos wait for a click last moved.
+        configuration.mediaTypesRequiringUserActionForPlayback = Web.playback
+        // A new window a pin's page asked for on a click — a target="_blank"
+        // link, or window.open from the click, as Gmail's links and many
+        // sites' do, often by way of a redirect on their own site — opens in
+        // the peek rather than the row (see peekWindow). Only on a click:
+        // a window the page opens by itself, even from a site allowed
+        // pop-ups, takes the tab path as before. A window sized by the page,
+        // "Sign in with…", is left alone, as is a modified click, and so is
+        // anything that isn't a web page (about:blank, data:, blob:).
+        if clicked, !behind, !popup, prefs.pinsPeek, peekTab == nil, opener.pin != nil,
+           [.linkActivated, .other].contains(action.navigationType),
+           action.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           let url = action.request.url, Browser.peekable(url) {
+            let page = peekWindow(configuration, from: opener, going: url)
+            opener.popupGesture.opened(page.id)
+            return page.web
+        }
         let tab = Tab(shy: opener.shy, configuration: configuration)
-        tab.popup = windowFeatures.width != nil || windowFeatures.height != nil
-            || windowFeatures.toolbarsVisibility?.boolValue == false
+        tab.popup = popup
         tab.opener = from
+        if clicked { opener.popupGesture.opened(tab.id) }
+        if prefs.popupWindows, windowFeatures.width != nil || windowFeatures.height != nil {
+            let sourceSpace = parked.first { $0.value.tabs.contains { $0 === opener } }?.key ?? spaceID
+            let popup = Browser(record: WindowRecord(space: sourceSpace), websitePopup: true)
+            popup.prepare(tab)
+            popup.tabs = [tab]
+            popup.activeID = tab.id
+            if let url = action.request.url { tab.setAddressOptimistically(url) }
+            let screen = (webView.window?.screen ?? NSScreen.main)?.visibleFrame
+            let frame = screen.map { Browsers.popupFrame(width: windowFeatures.width?.doubleValue,
+                                                        height: windowFeatures.height?.doubleValue, on: $0) }
+            Browsers.open(popup, frame: frame)
+            return tab.web
+        }
         // The link menu's Open Link in New Tab: behind this tab, where a
         // ⌘-click's goes (see open(_:foreground:)).
-        if behind, let source = self.tab(for: webView) {
-            prepare(tab)
-            if prefs.usesTabGroups, !tab.shy, !tab.bench { tab.groupID = source.groupID }
-            tabs.insert(tab, at: placeForNew())
+        let destination = tabDestination
+        destination.prepare(tab)
+        if behind {
+            if prefs.usesTabGroups, !tab.shy, !tab.bench { tab.groupID = opener.groupID }
+            destination.tabs.insert(tab, at: destination.placeForNew())
         } else {
-            adopt(tab)
-            activeID = tab.id
-            editing = false
+            destination.tabs.insert(tab, at: destination.placeForFront())
+            destination.activeID = tab.id
+            destination.editing = false
         }
         // Returning the view is what makes it the target. WebKit loads the
         // request into it itself when the action carries one.
         if let url = action.request.url { tab.setAddressOptimistically(url) }
         return tab.web
+    }
+
+    /// A link clicked open in a tab by Search itself (⌘-click, the middle
+    /// button): one click, one tab. When the page's own script already
+    /// opened a window for that click, it is the tab — put where the click
+    /// asked, behind unless ⇧ was held — and no second one opens. Otherwise
+    /// the click is spent, and a window.open after it gets nothing.
+    private func openClicked(_ url: URL, foreground: Bool, from source: Tab?, view: WKWebView?) {
+        let opener = view.flatMap { popupTab(for: $0) }
+        if let made = opener?.popupGesture.claim(),
+           let tab = Browsers.all.lazy.flatMap(\.tabs).first(where: { $0.id == made }) {
+            if !foreground, activeID == tab.id, let source, tabs.contains(where: { $0.id == source.id }) {
+                activeID = source.id
+            }
+            return
+        }
+        openInternal(url, foreground: foreground, from: source, mayWait: true)
     }
 
     /// Anything the window can't show is something to keep instead.
@@ -5190,11 +6463,36 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             guard let self else { return decisionHandler(.deny) }
             // One question at a time. A second page asking while the first is
             // still waiting is refused rather than queued behind it.
-            guard decide == nil else { return decisionHandler(.deny) }
+            guard !permissionBusy else { return decisionHandler(.deny) }
             decide = decisionHandler
             askedAbout = shy ? "" : key
             asking = CaptureAsk(host: host, wants: Browser.name(for: type))
         }, drop: { decisionHandler(.deny) })
+    }
+
+    /// WebKit's private delegate lets Search ask before opening the system picker.
+    /// Extension pages use separate delegates.
+    @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
+    func askedToShareScreen(_ webView: WKWebView, origin: WKSecurityOrigin, frame: WKFrameInfo,
+                            systemAudio: Bool, decisionHandler: @escaping (Int) -> Void) {
+        guard !permissionBusy, let tab = (tabs + parkedTabs).first(where: { $0.built === webView })
+        else { return decisionHandler(0) }
+        let request = UUID()
+        displayRequest = request
+        displayTab = tab
+        decideDisplay = decisionHandler
+        let asker = frame.securityOrigin
+        let host = origin.host.isEmpty ? (tab.address?.host() ?? "This page") : origin.host
+        let named = Browser.extensionScheme(asker.protocol) ? Browser.extensionName(asker.host) : host
+        // Recheck ownership when a background tab's question is shown.
+        displayHeld = ask(from: webView, show: { [weak self, weak webView] in
+            guard let self, displayRequest == request else { return }
+            guard let webView, activeID == tab.id, tab.built === webView else { return cancelDisplay() }
+            asking = CaptureAsk(host: named, wants: "screen", screen: true, sound: systemAudio)
+        }, drop: { [weak self] in
+            guard let self, displayRequest == request else { return }
+            cancelDisplay()
+        })
     }
 
     /// An extension's own scheme, today's or the one it had before.
@@ -5245,7 +6543,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             return give(remembered ? .grant : .deny)
         }
         // One question at a time, as for the camera.
-        guard decide == nil else { return give(.deny) }
+        guard !permissionBusy else { return give(.deny) }
         decide = give
         askedAbout = tab.shy ? "" : key
         let named = Browser.extensionScheme(origin.protocol) ? Browser.extensionName(origin.host) : origin.host
@@ -5267,7 +6565,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         if let remembered = SiteNotifications.choices[site] { return decisionHandler(remembered) }
         ask(from: webView, show: { [weak self] in
             guard let self else { return decisionHandler(false) }
-            guard decide == nil else { return decisionHandler(false) }
+            guard !permissionBusy else { return decisionHandler(false) }
             decide = { decision in
                 if decision == .grant { SiteNotifications.shared.authorize() }
                 decisionHandler(decision == .grant)
@@ -5317,10 +6615,10 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     /// reload to fetch, because there is no longer an address to fetch.
     func webViewDidClose(_ webView: WKWebView) {
         guard let tab = tab(for: webView) else { return }
-        // An extension's popup window is the one page it opened: when that
-        // page closes itself (Affinity Pathfinder's sign-in, once done), the
+        // A popup window is the one page it opened: when that
+        // page closes itself (a sign-in, once done), the
         // window goes too, as in Chrome, instead of staying on a blank tab.
-        if extensionPopup != nil, tabs.count == 1 {
+        if isPopup, tabs.count == 1 {
             window?.close()
             return
         }
@@ -5334,10 +6632,17 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if websitePopup { cancelCapture() }
         popupTab(for: webView)?.popupGesture.clear()
         guard let tab = tab(for: webView) else {
             // A small window's page came: what failed before it is over.
             littleTab(for: webView)?.failure = nil
+            // A peek or a small window opens at the size the site has, or
+            // the one in Settings, as a tab does: neither is in the row,
+            // and both opened at 100% (#691).
+            if let page = peekTab?.built === webView ? peekTab : littleTab(for: webView) {
+                page.applyRememberedZoom()
+            }
             return
         }
         tab.didCommit()
@@ -5363,6 +6668,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
         guard events & PageView.firstFrame != 0 else { return }
         (webView as? PageView)?.showFirstFrame()
+        // Dark pages: a page's first frame is what it looks like.
+        if let tab = tab(for: webView) { duskLook(tab) }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -5371,6 +6678,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         (webView as? PageView)?.showFirstFrame()
         guard let tab = anyTab(for: webView), let url = tab.address else { return }
         tab.uncover()
+        // And again once it has all come in, for a page that drew its look
+        // late, or never had a first frame to say so.
+        duskLook(tab)
         // The find bar still open over a page that has just come in: look
         // for the same words on it.
         if tab.id == activeID, finding, findSpec == nil,
@@ -5380,6 +6690,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         tellStore(tab)
         // A page that arrived after a password went out: did the sign-in take?
         tab.settleSignIn()
+        // A page in a language you always translate, or one that slept
+        // translated (Translate.swift). Nothing at all while it's off.
+        tab.translateIfWanted()
         // The icon is asked for whether or not the tab is showing one: it may
         // be turned on a moment later, and a tab that then has to wait for a
         // fetch looks broken.
@@ -5388,7 +6701,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         history.record(url, title: tab.title)
         // A site's home page that says where its search is (OpenSearch):
         // with Search a site on, it joins the list (see SiteSearch.learn).
-        if prefs.searchesSites, url.scheme == "https", url.path.isEmpty || url.path == "/" {
+        if prefs.searchesSites, profileID == Profile.personalID, url.scheme == "https", url.path.isEmpty || url.path == "/" {
             webView.evaluateInSearch(SiteSearch.lookup) { value in
                 guard let text = value as? String, let description = URL(string: text) else { return }
                 MainActor.assumeIsolated { SiteSearch.learn(from: url, description: description) }
@@ -5410,6 +6723,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // page didn't load" over a download that had worked — clicked again,
         // it downloaded again.
         guard !(nsError.domain == "WebKitErrorDomain" && code == 102) else { return }
+        // Nor is a video or sound file opened as a page: WebKit's own player
+        // takes it over and ends the load with "plug-in handled load" (204),
+        // as in Safari, while the video plays. Answered as a failure, it
+        // covered the playing video with "The page didn't load".
+        guard !(nsError.domain == "WebKitErrorDomain" && code == 204) else { return }
         tab?.failure = message(for: code)
     }
 
@@ -5666,5 +6984,88 @@ final class PrintSheet: NSObject {
             PrintSheet.cancelled[tab] = seen
         }
         done()
+    }
+}
+
+// MARK: - Search's own pages, in tabs (see InternalPages.swift)
+
+extension Browser {
+    /// The tab in this window's row showing that kind of page, if any.
+    func pageTab(_ kind: InternalPage.Kind) -> Tab? {
+        tabs.first { $0.page?.kind == kind }
+    }
+
+    /// ⌘, ⌘Y ⇧⌘J and the menus: the page's tab, brought forward if it is
+    /// open, made otherwise. An empty tab in front becomes the page rather
+    /// than being left behind it; a private one doesn't — these pages are
+    /// never private, as Chrome's settings never open in an incognito
+    /// window — and the page opens beside it.
+    @discardableResult
+    func show(_ page: InternalPage) -> Tab {
+        // A pop-up window holds its one page: Search's own open beside it.
+        if websitePopup { return tabDestination.show(page) }
+        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page(rawValue: detail) {
+            settingsPage = section
+        }
+        if page.kind == .passwords { relist() }
+        if page.kind == .history, pageTab(.history) == nil { recallMode = .history }
+        let tab: Tab
+        if let open = pageTab(page.kind) {
+            tab = open
+            // Asked for another section, or another browser to bring
+            // things from: the open tab moves there, without a step back.
+            if page.detail != nil, open.page != page {
+                open.show(page, stepping: false)
+                objectWillChange.send()
+            }
+        } else {
+            if let blank = active, blank.isBlank, !blank.shy, !blank.bench, blank.pin == nil,
+               blank.draft.isEmpty, typed.isEmpty {
+                tab = blank
+            } else {
+                tab = Tab(configuration: Web.configuration(space: spaceID))
+                prepare(tab)
+                tabs.insert(tab, at: placeForNew())
+            }
+            tab.show(page)
+        }
+        if launching { dismiss() }
+        summoning = false
+        editing = false
+        typed = ""
+        if activeID != tab.id { select(tab) }
+        writeSessionSoon()
+        return tab
+    }
+
+    /// From one of these pages to another — Settings' "Passwords…", Bring
+    /// Things Over's "Show bookmarks": the same tab goes there, and Back
+    /// comes back, as a link would. Unless that page is already open in a
+    /// tab of its own, which is then the one shown.
+    func lead(to page: InternalPage) {
+        guard let here = active, here.page != nil, pageTab(page.kind) == nil else {
+            show(page)
+            return
+        }
+        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page(rawValue: detail) {
+            settingsPage = section
+        }
+        here.show(page)
+        writeSessionSoon()
+    }
+
+    /// The page's tab closed, as ⌘W would close it. For the bench, and the
+    /// last few callers that put a panel away.
+    func putAway(_ kind: InternalPage.Kind) {
+        guard let tab = pageTab(kind) else { return }
+        close(tab)
+    }
+
+    /// Settings moved to another of its sections: the tab's address says
+    /// so, and comes back there after a relaunch.
+    func settingsMoved(to section: SettingsPanel.Page) {
+        guard let tab = pageTab(.settings), tab.page?.detail != section.rawValue else { return }
+        tab.show(InternalPage(.settings, section.rawValue), stepping: false)
+        writeSessionSoon()
     }
 }

@@ -61,6 +61,18 @@ class H(BaseHTTPRequestHandler):
             <iframe src="http://localhost:{sv.srv.server_port}/ad"></iframe>"""
         elif page == "/ad":
             body = "<script>setInterval(() => window.open('/opened-ad'), 100)</script>ad frame"
+        elif page == "/sandboxed":
+            # An answer drawn in a sandbox (an opaque origin), its link
+            # target=_blank: the click in the frame opens it (hark.com, 18 Oct).
+            body = """<iframe id="go" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+            src="/answer" style="width:600px;height:300px;border:0"></iframe>"""
+        elif page == "/answer":
+            body = '<a target="_blank" href="/opened-sandboxed" style="display:block;height:300px">a source</a>'
+        elif page == "/sandboxed-ads":
+            body = """<button id="go">Activate parent only</button>
+            <iframe sandbox="allow-scripts allow-popups" src="/ad-sandboxed"></iframe>"""
+        elif page == "/ad-sandboxed":
+            body = "<script>setInterval(() => window.open('/opened-sandboxed-ad'), 100)</script>ad frame"
         elif page == "/menu":
             body = '<a href="/opened-menu" style="display:block;font-size:60px;line-height:120px;padding:0 20px">a link</a>'
         else:
@@ -119,6 +131,12 @@ def main():
 
         page = sv.page("ads"); tap(page); time.sleep(3)
         t.ok("repeated cross-origin ad-frame requests are refused", not opened("ad"))
+
+        page = sv.page("sandboxed"); time.sleep(1); tap(page); time.sleep(3)
+        t.ok("a link in a sandboxed frame opens one tab", len(opened("sandboxed")) == 1)
+
+        page = sv.page("sandboxed-ads"); time.sleep(1); tap(page); time.sleep(3)
+        t.ok("a sandboxed ad frame cannot use the parent's click", not opened("sandboxed-ad"))
 
         print("NOT RUN: native menu held >5 seconds requires the interactive --serve check.")
     finally:

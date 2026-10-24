@@ -100,6 +100,7 @@ struct SplitTabItem: View {
 
 private struct SplitTabHalf: View {
     @Environment(\.greys) private var greys
+    @Environment(\.tabShortcutNumbers) private var shortcutNumbers
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
     @ObservedObject var tab: Tab
@@ -111,19 +112,24 @@ private struct SplitTabHalf: View {
     let interactive: Bool
     let pill: Namespace.ID
     @Binding var hovered: Tab.ID?
+    @State private var selectedOnPress = false
 
     private var hovering: Bool { hovered == tab.id }
     private var title: String { tab.label.isEmpty ? "New Tab" : tab.label }
     private var playing: Bool { !tab.loading && (tab.noisy || tab.muted) }
     private var editing: Bool { browser.editingTab == tab.id }
+    /// Where the page is, said on the half you're on (Settings › Tabs › Show
+    /// the address on the tab you're on).
+    private var rest: AtRest? { focused && !editing && !narrow ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
+    private var atRest: Bool { rest != nil }
 
     private var laidOut: some View {
         row
-            .padding(.leading, stacked ? 10 : 9)
+            .padding(.leading, stacked ? 0 : 9)
             .padding(.trailing, stacked ? 7 : 4)
             .frame(height: stacked ? height : 28)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background { ground }
+            .background { ground.animation(Motion.quick, value: stacked && focused) }
             .frame(height: height)
             .contentShape(Rectangle())
     }
@@ -131,7 +137,7 @@ private struct SplitTabHalf: View {
     private var handled: some View {
         laidOut
             .modifier(OneClick(double: false) {
-                guard interactive, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
+                guard interactive, !stacked || !selectedOnPress, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
                 browser.clearTabSelection()
                 if focused { browser.beginTabEdit(tab) }
                 else { browser.focusPane(tab) }
@@ -197,8 +203,18 @@ private struct SplitTabHalf: View {
     private var row: some View {
         HStack(spacing: stacked ? 8 : 5) {
             titleContent
-            Spacer(minLength: 0)
+                .padding(.leading, stacked ? 10 : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: stacked ? height : 16)
+                .contentShape(Rectangle())
+                .modifier(TabPress(enabled: stacked && interactive && !editing, active: focused, selected: $selectedOnPress) {
+                    browser.clearTabSelection()
+                    browser.focusPane(tab)
+                })
             if !editing {
+                if interactive, let number = shortcutNumbers[tab.id] {
+                    TabShortcutNumber(number: number)
+                }
                 status
                 // In the column each line has its own cross at its own end,
                 // one under the other; across the top the item has one.
@@ -223,6 +239,10 @@ private struct SplitTabHalf: View {
                         .font(.system(size: 9))
                         .foregroundStyle(Palette.muted)
                 }
+                if !narrow {
+                    PopupSign(browser: browser, tab: tab)
+                    TranslateSign(tab: tab)
+                }
                 // The page is asking something, over its half of the stage.
                 if browser.paneQuestions.contains(where: { $0.tab == tab.id }) {
                     Circle()
@@ -231,11 +251,10 @@ private struct SplitTabHalf: View {
                         .accessibilityLabel("Asking a question")
                 }
                 if !narrow {
-                    Text(title)
-                        .font(.system(size: stacked ? prefs.sideTitle : 12))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .foregroundStyle(focused ? Palette.ink : hovering ? Palette.ink.opacity(0.7) : Palette.muted)
+                    TitleAtRest(label: title, rest: rest, shown: atRest, hovering: hovering,
+                                size: stacked ? prefs.sideTitle : 12,
+                                colour: focused ? Palette.ink : hovering ? Palette.ink.opacity(0.7) : Palette.muted,
+                                roomy: stacked)
                 }
             }
         }

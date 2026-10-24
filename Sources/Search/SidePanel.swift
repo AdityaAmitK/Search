@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import Combine
 
 // The side panel: beside the page on the side away from the column (on the
 // right with the tabs across the top), closed until something asks for it,
@@ -13,6 +14,13 @@ import WebKit
 // storage), shown here rather than in a tab. From Office Search Community's
 // work in progress (o5-panel).
 //
+// Or a website (idea 365), for whoever turns on Settings › General ›
+// Websites in the side panel: Claude or ChatGPT kept beside the page
+// without an extension. It is an ordinary page of the window's space, signed
+// in where that space's tabs are, never a private tab's; its address is on
+// the panel's own line, since it stays beside every tab. Links it opens in
+// a new window go to a tab.
+//
 // Where the card goes, its gap, corners and the handle that resizes it are
 // the window's layout (ContentView); what is in it is here.
 
@@ -21,6 +29,25 @@ enum SidePanelContent: Equatable {
     /// extension named one (setOptions with a tabId) — it goes with that tab,
     /// hidden on the others and back on it, as in Chrome. Nil: the window's.
     case page(extensionID: String, url: URL, tab: Tab.ID?)
+    /// A website, in the space the window was in when it opened.
+    case site(url: URL, space: UUID)
+}
+
+/// The sites offered in View › Side Panel, as they are typed: a short list,
+/// plus whatever page you are on.
+enum PanelSites {
+    static let offered: [(name: String, url: URL)] = [
+        ("Claude", URL(string: "https://claude.ai/new")!),
+        ("ChatGPT", URL(string: "https://chatgpt.com/")!),
+        ("Gemini", URL(string: "https://gemini.google.com/app")!),
+        ("Perplexity", URL(string: "https://www.perplexity.ai/")!),
+    ]
+
+    /// Only the web: never a file, a script or an extension's page.
+    static func allowed(_ url: URL?) -> Bool {
+        guard let scheme = url?.scheme?.lowercased() else { return false }
+        return scheme == "https" || scheme == "http"
+    }
 }
 
 extension Preferences {
@@ -29,31 +56,48 @@ extension Preferences {
     static let sidePanelStart: CGFloat = 380
 }
 
+/// What came of asking for the panel. `taken`: the panel dealt with it, up
+/// or put away again. `noPanel`: none can be made in this window (a popup
+/// window, a page that didn't load), and the caller opens the extension's
+/// page as a tab instead, as it did before there was a panel. `notHere`:
+/// the tab in front is private and the extension hasn't been let into
+/// private tabs, so nothing opens at all, a tab least of all.
+enum SidePanelAnswer: Equatable {
+    case taken
+    case noPanel
+    case notHere
+}
+
 // MARK: - opening and closing
 
 extension Browser {
     /// An extension's panel page in this window's side panel.
-    /// False when there is no panel to be had (a popup window, no page
-    /// made): the caller opens the page as a tab instead.
     @available(macOS 15.4, *)
     @discardableResult
-    func showSidePanel(_ context: WKWebExtensionContext, url: URL, for tab: Tab.ID? = nil) -> Bool {
-        guard extensionPopup == nil else { return false }
+    func showSidePanel(_ context: WKWebExtensionContext, url: URL, for tab: Tab.ID? = nil) -> SidePanelAnswer {
+        guard !isPopup else { return .noPanel }
+        // An extension not let into private tabs is given nothing of one
+        // (Extensions' `hidden`): no address, no title, no view to run a
+        // script in. A panel of its own beside that page would be a panel
+        // about a page it cannot see, so it doesn't open there.
+        guard !Browser.holdsPanel(shy: panelPanes(tab).contains { $0.shy },
+                                  letIn: Extensions.mayGoPrivate(context))
+        else { return .notHere }
         let content = SidePanelContent.page(extensionID: context.uniqueIdentifier, url: url, tab: tab)
-        guard SidePanelPages.shared.load(url, from: context, in: self) else { return false }
+        guard SidePanelPages.shared.load(url, from: context, in: self) else { return .noPanel }
         if let tab { SidePanelPages.shared.bind(content, to: tab, in: self) }
         sidePanel = content
         sidePanelShown = true
-        return true
+        return .taken
     }
 
     /// The extension's button again, with its panel up: it goes, as a
     /// second press on a popup's button does.
     @available(macOS 15.4, *)
-    func toggleSidePanel(_ context: WKWebExtensionContext, url: URL, for tab: Tab.ID? = nil) -> Bool {
+    func toggleSidePanel(_ context: WKWebExtensionContext, url: URL, for tab: Tab.ID? = nil) -> SidePanelAnswer {
         if sidePanelShown, case .page(let id, _, _) = sidePanel, id == context.uniqueIdentifier {
             closeSidePanel()
-            return true
+            return .taken
         }
         return showSidePanel(context, url: url, for: tab)
     }
@@ -67,6 +111,64 @@ extension Browser {
         open(url, foreground: true)
     }
 
+    /// A website in this window's side panel, signed in as this space's tabs
+    /// are (Settings › General › Websites in the side panel). The same site
+    /// again closes it, as a second press on an extension's button does.
+    @discardableResult
+    func showSiteInPanel(_ url: URL) -> Bool {
+        guard prefs.sitesInPanel, PanelSites.allowed(url), !isPopup else { return false }
+        if sidePanelShown, case .site = sidePanel, SidePanelPages.shared.siteArrived(in: self)?.host() == url.host() {
+            closeSidePanel()
+            return true
+        }
+        if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
+        SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
+        sidePanel = .site(url: url, space: spaceID)
+        sidePanelShown = true
+        prefs.panelSite = url.absoluteString
+        return true
+    }
+
+    /// View › Side Panel › Show Side Panel: the site last there, or Claude,
+    /// and closing whatever is there.
+    func toggleSitePanel() {
+        guard prefs.sitesInPanel else { return }
+        if sidePanelShown { return closeSidePanel() }
+        let last = URL(string: prefs.panelSite).flatMap { PanelSites.allowed($0) ? $0 : nil }
+        showSiteInPanel(last ?? PanelSites.offered[0].url)
+    }
+
+    /// The store this window's tabs use in `space`: that space's, inside the
+    /// window's profile (Spaces.store), or the profile's own for a space it
+    /// doesn't list. Never another profile's, whatever Spaces.current is.
+    func panelStore(_ space: UUID) -> WKWebsiteDataStore {
+        spaces.contains(where: { $0.id == space }) ? Spaces.store(for: space) : Profiles.store(profileID)
+    }
+
+    /// The tab's page into the side panel, from the tab's menu. Not a
+    /// private tab's: the panel is signed in as the space is.
+    func openInSidePanel(_ tab: Tab) {
+        guard !tab.shy, let url = tab.address else { return }
+        showSiteInPanel(url)
+    }
+
+    /// The site in the panel, as a tab of its own, and the panel closed.
+    func sitePanelToTab() {
+        guard case .site(let first, _) = sidePanel else { return }
+        let url = SidePanelPages.shared.siteArrived(in: self) ?? first
+        closeSidePanel()
+        open(url, foreground: true)
+    }
+
+    /// The window went to another space: the site comes again, signed in as
+    /// that space is.
+    func sitePanelFollowsSpace() {
+        guard case .site(let first, let space) = sidePanel, space != spaceID else { return }
+        let url = SidePanelPages.shared.siteArrived(in: self) ?? first
+        SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
+        sidePanel = .site(url: url, space: spaceID)
+    }
+
     /// Closed: an extension's page is let go, as Chrome does.
     func closeSidePanel() {
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
@@ -76,18 +178,71 @@ extension Browser {
     }
 
     /// Another tab in front: a panel opened for the tab just left goes
-    /// with it, and one opened for this tab comes back.
+    /// with it, and one opened for this tab comes back. A panel whose
+    /// extension may not see the tab arriving is neither of those: it is
+    /// held back where it stands, which the window works out as it draws
+    /// (`sidePanelHeld`).
     func sidePanelFollows(_ tab: Tab) {
         if case .page(_, _, let bound?) = sidePanel, bound != tab.id {
             SidePanelPages.shared.drop(in: self)
             sidePanelShown = false
             sidePanel = nil
         }
-        if #available(macOS 15.4, *), sidePanel == nil,
-           case .page(let id, let url, _)? = SidePanelPages.shared.bound(to: tab.id, in: self),
-           let context = Extensions.shared.contexts[id] {
-            showSidePanel(context, url: url, for: tab.id)
-        }
+        sidePanelReturns(to: tab)
+    }
+
+    /// The switch in Settings > Extensions has moved for an extension: a
+    /// panel bound to the tab in front comes back if it may be seen there
+    /// now, and the window draws again for one let through or held back.
+    /// `sidePanelHeld` is worked out, not kept, so every other way a tab
+    /// comes to the front is right without knowing about the panel.
+    func sidePanelPrivacyChanged() {
+        if let active { sidePanelReturns(to: active) }
+        objectWillChange.send()
+    }
+
+    /// A panel bound to this tab and not up: back, if this tab is one its
+    /// extension may see.
+    private func sidePanelReturns(to tab: Tab) {
+        guard #available(macOS 15.4, *), sidePanel == nil,
+              case .page(let id, let url, _)? = SidePanelPages.shared.bound(to: tab.id, in: self),
+              let context = Extensions.shared.contexts[id]
+        else { return }
+        showSidePanel(context, url: url, for: tab.id)
+    }
+
+    /// The panel is up and held back beside a private page: one of the
+    /// pages on screen is a private tab, and its extension hasn't been let
+    /// into private tabs. The window gives the panel's room to the page
+    /// meanwhile, and the page in the panel is kept, so it comes back as
+    /// you left it on a page the extension may see. An extension gone while
+    /// its panel is up is held back too, having nothing left to say it may
+    /// be there.
+    var sidePanelHeld: Bool {
+        guard case .page(let id, _, _) = sidePanel, panelPanes().contains(where: { $0.shy })
+        else { return false }
+        guard #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] else { return true }
+        return Browser.holdsPanel(shy: true, letIn: Extensions.mayGoPrivate(context))
+    }
+
+    /// The decision itself, away from a window: a private page on screen and
+    /// an extension not let into private tabs hold its panel back.
+    static func holdsPanel(shy: Bool, letIn: Bool) -> Bool { shy && !letIn }
+
+    /// The pages a panel sits beside: the tab it was opened for, else the
+    /// one in front, and in Split View the other half of its pair, since
+    /// the panel stands beside both at once. A pair holds two tabs of the
+    /// same kind today (`canSplit` asks for `first.shy == second.shy`), so
+    /// the pair's half says nothing the tab in front hasn't already said;
+    /// it is written on what is on screen rather than on that rule holding.
+    /// `split(for:)` answers nothing while Split View is off, where a kept
+    /// pair shows one page as any other tab does.
+    private func panelPanes(_ tab: Tab.ID? = nil) -> [Tab] {
+        guard let here = tabs.first(where: { $0.id == (tab ?? activeID) }) else { return [] }
+        guard let pair = split(for: here), let other = pair.partner(of: here.id),
+              let beside = tabs.first(where: { $0.id == other })
+        else { return [here] }
+        return [here, beside]
     }
 }
 
@@ -100,14 +255,40 @@ final class SidePanelPages: NSObject {
 
     private final class Page {
         let web: WKWebView
-        let delegate: PanelDelegate
-        init(web: WKWebView, delegate: PanelDelegate) { self.web = web; self.delegate = delegate }
+        let delegate: NSObject
+        init(web: WKWebView, delegate: NSObject) { self.web = web; self.delegate = delegate }
     }
     private var pages: [ObjectIdentifier: Page] = [:]
     private var bound: [ObjectIdentifier: [Tab.ID: SidePanelContent]] = [:]
 
     /// The page up in this window's panel, for SidePanelView and the bench.
     func web(in browser: Browser) -> WKWebView? { pages[ObjectIdentifier(browser)]?.web }
+
+    /// A website's page that arrived (committed) in this window's panel: what
+    /// its line names, what goes to a tab and what follows a space switch.
+    /// Not where it is only on its way to.
+    func siteArrived(in browser: Browser) -> URL? {
+        (pages[ObjectIdentifier(browser)]?.delegate as? SitePanelDelegate)?.arrived
+    }
+
+    fileprivate func siteDelegate(in browser: Browser) -> SitePanelDelegate? {
+        pages[ObjectIdentifier(browser)]?.delegate as? SitePanelDelegate
+    }
+
+    /// For the bench: the website's page as its line shows it, and how often
+    /// it was made again after a crash.
+    func siteReport(in browser: Browser) -> [String: Any] {
+        guard let delegate = siteDelegate(in: browser) else { return [:] }
+        return ["arrived": delegate.arrived?.absoluteString ?? "", "line": SiteLine.Seen.name(delegate.arrived),
+                "reloads": delegate.reloads, "gaveUp": delegate.gaveUp]
+    }
+
+    /// For the bench: WebKit's word that the page's process is gone, as a
+    /// crash gives it.
+    func siteCrashed(in browser: Browser) {
+        guard let page = pages[ObjectIdentifier(browser)], let delegate = page.delegate as? SitePanelDelegate else { return }
+        delegate.webViewWebContentProcessDidTerminate(page.web)
+    }
 
     @available(macOS 15.4, *)
     func load(_ url: URL, from context: WKWebExtensionContext, in browser: Browser) -> Bool {
@@ -127,6 +308,28 @@ final class SidePanelPages: NSObject {
         web.load(URLRequest(url: url))
         pages[key] = Page(web: web, delegate: delegate)
         return true
+    }
+
+    /// A website, in a page made as a tab's is in `space` (Web.configuration):
+    /// its store, its user agent, extensions where tabs have them. Never a
+    /// private tab's store. No window opens from it without a click.
+    func loadSite(_ url: URL, space: UUID, in browser: Browser) {
+        drop(in: browser)
+        // The window's profile's store for that space: signed in where
+        // this window's tabs are, never another profile's.
+        let configuration = Web.configuration(space: space, store: browser.panelStore(space))
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), configuration: configuration)
+        let delegate = SitePanelDelegate(browser: browser)
+        delegate.watch(web)
+        web.navigationDelegate = delegate
+        web.uiDelegate = delegate
+        web.allowsMagnification = true
+        web.allowsBackForwardNavigationGestures = true
+        // The Web Inspector as for a tab, by the same rule (Web.inspectable).
+        Web.inspectable(web)
+        web.load(URLRequest(url: url))
+        pages[ObjectIdentifier(browser)] = Page(web: web, delegate: delegate)
     }
 
     func drop(in browser: Browser) {
@@ -159,6 +362,90 @@ final class SidePanelPages: NSObject {
             }
         }
     }
+}
+
+/// A website in the panel: its own pages stay in it, a window it opens goes
+/// to a tab, only on a click, and nothing but the web loads in it. It never
+/// gets the camera, the microphone or the screen: it stays beside every tab,
+/// so nobody could tell which page is listening.
+@MainActor
+private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+    weak var browser: Browser?
+    init(browser: Browser) { self.browser = browser }
+
+    /// The page that arrived: set when a main-frame navigation commits, and
+    /// as the address moves inside the same site (a link the page handles
+    /// itself, history.pushState). A page only asked for, or on its way,
+    /// leaves it as it was, so the line never names a site not yet there.
+    @Published private(set) var arrived: URL?
+    private var watching: NSKeyValueObservation?
+
+    func watch(_ web: WKWebView) {
+        watching = web.observe(\.url, options: [.new]) { [weak self] web, _ in
+            let now = web.url
+            DispatchQueue.main.async {
+                guard let self, let now, let was = self.arrived, Self.sameSite(now, was) else { return }
+                self.arrived = now
+            }
+        }
+    }
+
+    static func sameSite(_ a: URL, _ b: URL) -> Bool {
+        a.scheme?.lowercased() == b.scheme?.lowercased() && a.host()?.lowercased() == b.host()?.lowercased() && a.port == b.port
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        arrived = webView.url
+    }
+
+    /// Crashes in a row: the page is made again twice a minute at most, then
+    /// left as it is (the panel's line still closes it or opens it in a tab).
+    private var crashes: [Date] = []
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.shouldPerformDownload { return decisionHandler(.cancel) }
+        guard navigationAction.targetFrame?.isMainFrame == true else { return decisionHandler(.allow) }
+        let url = navigationAction.request.url
+        if PanelSites.allowed(url) || url?.scheme?.lowercased() == "about" { return decisionHandler(.allow) }
+        decisionHandler(.cancel)
+    }
+
+    /// A link to a new window: a tab, after a click in the panel.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if PanelSites.allowed(navigationAction.request.url), let url = navigationAction.request.url {
+            browser?.open(url, foreground: true)
+        }
+        return nil
+    }
+
+    /// No camera, no microphone.
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(.deny)
+    }
+
+    /// No screen sharing: answered here, as no (0), so WebKit never shows
+    /// its picker for the panel.
+    @objc(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:)
+    func displayCapture(_ web: WKWebView, origin: WKSecurityOrigin, frame: WKFrameInfo, systemAudio: Bool,
+                        decisionHandler: @escaping (Int) -> Void) {
+        decisionHandler(0)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        let now = Date()
+        crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
+        guard crashes.count <= 2 else { return }
+        reloads += 1
+        webView.reload()
+    }
+
+    /// How many times the page was made again, for the bench.
+    private(set) var reloads = 0
+    var gaveUp: Bool { crashes.count > 2 }
 }
 
 /// The panel page's own delegate: a link it opens elsewhere goes to a tab,
@@ -296,9 +583,58 @@ struct SidePanelView: View {
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 PanelPage(browser: browser)
             }
+        case .site:
+            VStack(spacing: 0) {
+                if let delegate = SidePanelPages.shared.siteDelegate(in: browser) { SiteLine(browser: browser, delegate: delegate) }
+                Rectangle().fill(Palette.hairline).frame(height: 1)
+                PanelPage(browser: browser)
+            }
         case nil:
             Color.clear
         }
+    }
+}
+
+/// A website's line above it in the panel: where it is, since it stays
+/// beside every tab, then into a tab of its own, and close.
+private struct SiteLine: View {
+    @ObservedObject var browser: Browser
+    @StateObject private var seen: Seen
+
+    init(browser: Browser, delegate: SitePanelDelegate) {
+        self.browser = browser
+        _seen = StateObject(wrappedValue: Seen(delegate))
+    }
+
+    /// The address of the page that arrived, as it changes.
+    @MainActor final class Seen: ObservableObject {
+        @Published var host = ""
+        private var watch: AnyCancellable?
+        init(_ delegate: SitePanelDelegate) {
+            host = Seen.name(delegate.arrived)
+            watch = delegate.$arrived.receive(on: DispatchQueue.main).sink { [weak self] url in
+                self?.host = Seen.name(url)
+            }
+        }
+        nonisolated static func name(_ url: URL?) -> String {
+            guard let url, let host = url.host() else { return "" }
+            return Address.withoutWWW(host) + (url.scheme?.lowercased() == "http" ? " (not secure)" : "")
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(seen.host)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            Door(icon: "arrow.up.forward.square", help: "Open in a Tab") { browser.sitePanelToTab() }
+            Door(icon: "xmark", help: "Close") { browser.closeSidePanel() }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 }
 

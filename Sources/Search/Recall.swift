@@ -74,8 +74,7 @@ struct HistoryPanel: View {
                                         Row(
                                             trace: trace,
                                             go: {
-                                                browser.recalling = false
-                                                browser.navigateInternal(trace.url, in: browser.active)
+                                                browser.navigateInternal(trace.url, in: browser.pageTab(.history) ?? browser.active)
                                             },
                                             forget: {
                                                 browser.history.forget(trace.key)
@@ -101,7 +100,7 @@ struct HistoryPanel: View {
                         }
                         .padding(.bottom, 2)
                     }
-                    .frame(maxHeight: 420)
+                    .listHeight(420)
                 }
             }
         } foot: {
@@ -211,7 +210,7 @@ struct HistoryPanel: View {
 
         var body: some View {
             HStack(spacing: 12) {
-                Mark(icon: Favicons.shared.cached(Favicons.site(trace.url) ?? ""),
+                Mark(icon: Favicons.shared.cached(for: trace.url),
                      letter: trace.address.first.map { String($0).uppercased() } ?? "•", size: 16)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(trace.title.isEmpty ? Address.withoutWWW(trace.address) : trace.title)
@@ -300,7 +299,7 @@ struct DownloadsPanel: View {
                     }
                     .padding(.bottom, 2)
                 }
-                .frame(maxHeight: 420)
+                .listHeight(420)
             }
         } foot: {
             HStack {

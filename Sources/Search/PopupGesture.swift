@@ -11,6 +11,10 @@ struct PopupGesture {
     private var consumed = false
     private var input = false
     private var menu = false
+    /// Which interaction this is, kept across clear(), and the tab the
+    /// page's own window for it became (see opened(_:) and claim()).
+    private var serial = 0
+    private var made: (serial: Int, tab: UUID)?
 
     mutating func record(origin: String?, kind: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         // Click and contextmenu follow mousedown (or keyboard activation). They must not
@@ -21,6 +25,7 @@ struct PopupGesture {
             return
         }
         self.origin = origin
+        serial += 1
         recorded = true
         time = now
         consumed = false
@@ -39,7 +44,37 @@ struct PopupGesture {
         return true
     }
 
-    mutating func clear() { self = PopupGesture() }
+    /// Whether a refused window came from an interaction that already
+    /// had its one: a second window for the same click, or a page's own
+    /// beside the tab Search opened for a ⌘-click (see claim()). That one
+    /// is the duplicate one click must not make, not a pop-up to offer.
+    func spent(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        recorded && consumed && now >= time && now - time <= 5
+    }
+
+    mutating func clear() {
+        let serial = serial
+        self = PopupGesture()
+        self.serial = serial
+    }
+
+    /// The window take() just granted became this tab.
+    mutating func opened(_ tab: UUID) {
+        made = (serial, tab)
+    }
+
+    /// A tab Search opens itself for a click — ⌘-click, the middle button.
+    /// One click makes one tab: a page that also calls window.open from the
+    /// same click (Gmail's links do, beside their own target=_blank) gets no
+    /// second one, whichever comes first. Returns the tab the page's window
+    /// already became for this interaction, if it came first; otherwise the
+    /// interaction is spent, so a window.open after this is refused.
+    mutating func claim(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> UUID? {
+        guard recorded, now >= time, now - time <= 5 else { return nil }
+        if consumed, let made, made.serial == serial { return made.tab }
+        consumed = true
+        return nil
+    }
 
     /// A native menu can remain open beyond the activation window. Keep the
     /// recorded frame and one-use limit when its action finally reaches WebKit.
@@ -52,7 +87,14 @@ struct PopupGesture {
 
     static func origin(_ info: WKFrameInfo) -> String? {
         let origin = info.securityOrigin
-        return originKey(scheme: origin.protocol, host: origin.host, port: origin.port)
+        if let key = originKey(scheme: origin.protocol, host: origin.host, port: origin.port) { return key }
+        // A sandboxed frame has an opaque origin: no tuple, so its own click
+        // never matched the link it was on, and every target=_blank link in
+        // it did nothing (answers some AI chats draw in a sandbox). It is
+        // keyed by its own document instead, never matching a frame with a
+        // tuple, nor an opaque top-level page (that one goes by mainFrame).
+        guard !info.isMainFrame, let url = info.request.url?.absoluteString, !url.isEmpty else { return nil }
+        return "opaque " + url
     }
 
     static func originKey(scheme: String, host: String, port: Int) -> String? {

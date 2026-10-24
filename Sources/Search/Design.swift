@@ -165,11 +165,15 @@ enum Metrics {
     static let helm: CGFloat = 3 * 26 + 2 * 2 + 8
     /// The same three doors again, in the sidebar, where they sit right of
     /// the lights instead. The column already has 10 of horizontal padding
-    /// of its own before this even starts, so this is the lights' own edge
-    /// (79) less that padding, plus a sliver of air — not the full breathing
-    /// room a tab row gets, because the sidebar's minimum width doesn't have
-    /// it to give.
-    static let sideLights: CGFloat = 72
+    /// of its own before this even starts. 72 put the back door's box 3
+    /// points from the zoom button and its chevron 12, "a little tight"
+    /// (feedback, 22 Oct 2026): at 80 the chevron is 20 points clear of the
+    /// lights, about the 19 the window leaves on their left, as a toolbar's
+    /// first item sits in Safari. A column too narrow for that gives back
+    /// what it must (SideBar.lights), down to where it was.
+    static let sideLights: CGFloat = 80
+    /// The three doors' own width, without the air after them.
+    static let helmDoors: CGFloat = 3 * 26 + 2 * 4
     /// The band left at the top when there is no strip: just enough for the
     /// traffic lights to sit in, and nothing else.
     static let bare: CGFloat = 34
@@ -207,17 +211,38 @@ enum Motion {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
+    /// Whether the Mac is short of power: Low Power Mode is on, or it is hot
+    /// enough that macOS is holding its processors back. Then the two springs
+    /// below become a short ease-out. A spring keeps moving long after it
+    /// looks done: glide takes about 0.5 s to settle, 30 frames that SwiftUI
+    /// works out one by one on the main thread, which is the thread a busy or
+    /// slowed Mac takes time from first, and every frame it misses shows as a
+    /// stutter. 0.16 s is 10 frames, and is over before a missed one shows.
+    /// Read at the moment something moves, so it follows the switch at once.
+    /// Only once it is turned on in Settings › General (Preferences.lightMotion).
+    static var light: Bool {
+        guard Store.settings.bool(forKey: lightKey) else { return false }
+        let info = ProcessInfo.processInfo
+        return info.isLowPowerModeEnabled || info.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+    }
+
+    nonisolated static let lightKey = "motion.light"
+
     static var glide: Animation? {
-        reduced ? nil : .spring(response: 0.34, dampingFraction: 0.82)
+        reduced ? nil : light ? .easeOut(duration: 0.16) : .spring(response: 0.34, dampingFraction: 0.82)
     }
 
     static var settle: Animation? {
-        reduced ? nil : .spring(response: 0.30, dampingFraction: 0.86)
+        reduced ? nil : light ? .easeOut(duration: 0.16) : .spring(response: 0.30, dampingFraction: 0.86)
     }
 
     static var quick: Animation? {
         reduced ? nil : .easeOut(duration: 0.14)
     }
+
+    /// How far a tab gives while it is pressed (see Give): enough to feel
+    /// under the pointer, about 3 points on a pill and 7 on a column row.
+    static let give: CGFloat = 0.97
 
     /// The folded column or strip coming out over the page, and going back.
     /// On glide it was slow both ways, next to Arc and Dia timed frame by

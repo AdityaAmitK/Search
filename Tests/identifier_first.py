@@ -43,6 +43,15 @@ PAGES = {
     "/many": '<form action="/s"><input id="a" name="first"><input name="last"><input name="city">'
              '<input name="street"><button>Send</button></form>',
     "/code": '<form action="/s"><input id="c" name="otc" autocomplete="one-time-code"><button>Verify</button></form>',
+    # GitHub's search dialog has no input name or id; only its accessible
+    # name and placeholder say what it is. Its issue title is not a login.
+    "/github-search": '<input type="text" role="combobox" aria-label="Search or jump to" '
+                      'placeholder="Search or jump to..."><button>Clear</button>',
+    "/issue-title": '<form><label for="issue-title">Add a title</label>'
+                    '<input id="issue-title" placeholder="Title"><textarea></textarea><button>Create</button></form>',
+    "/labelled-search": '<form><input id="u" aria-label="Search repositories"><button>Go</button></form>',
+    "/placeholder-search": '<form><input id="u" placeholder="Search repositories"><button>Go</button></form>',
+    "/username-off": '<form><input id="u" autocomplete="off" placeholder="Username"><button>Continue</button></form>',
 }
 
 
@@ -152,6 +161,12 @@ def main():
         t.ok("a box among many offers nothing", focus(m, "a").get("shown") is False)
         k = open_page(base, "/code")
         t.ok("a one-time code's box offers nothing", focus(k, "c").get("shown") is False)
+        for path in ["/github-search", "/issue-title", "/labelled-search", "/placeholder-search"]:
+            tab = open_page(base, path)
+            go(tab, "document.querySelector('input').focus(); true", 0.8)
+            t.ok(f"{path}: no sign-in suggestions", acc().get("shown") is False)
+        tab = open_page(base, "/username-off")
+        t.ok("autocomplete=off alone does not disable a sign-in", focus(tab, "u").get("shown") is True)
 
         # (d) A name and password on one page, as before.
         d = open_page(base, "/both")

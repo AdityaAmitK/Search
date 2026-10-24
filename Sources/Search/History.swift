@@ -22,6 +22,9 @@ struct Suggestion: Identifiable, Equatable {
         case known
         /// Not a place at all — words, and an engine to ask.
         case search
+        /// Words the engine itself suggested, from what was typed so far
+        /// (Settings › General › Suggestions from your search engine).
+        case suggested
         /// Not a place either: something the app itself does.
         case command(AddressCommand)
 
@@ -32,6 +35,7 @@ struct Suggestion: Identifiable, Equatable {
     /// ("Settings" typed with its capital), and two rows can't share a name.
     var id: String {
         if kind.isCommand { return "command " + key }
+        if case .suggested = kind { return "suggested " + key }
         if case .visited = kind { return History.identity(for: url) }
         return key
     }
@@ -81,7 +85,25 @@ final class History: ObservableObject {
     private var pageText: [String: PageText] = [:]
     private var visitedHosts: Set<String> = []
 
-    init() { load() }
+    /// Its file: history.json for Personal, one of its own for each other
+    /// profile (see Profiles.swift).
+    private let fileName: String
+    /// Its profile deleted: nothing more is written.
+    private var retired = false
+
+    init(file: String = "history.json") {
+        fileName = file
+        load()
+    }
+
+    /// Its profile deleted: emptied, its file removed, and nothing written again.
+    func retire() {
+        retired = true
+        visits = [:]
+        pageText = [:]
+        visitedHosts = []
+        Disk.remove(file)
+    }
 
     /// URL identity ignores fragments, normalizes only the scheme and host,
     /// and keeps the spelling and encoding of the path and query intact.
@@ -293,6 +315,8 @@ final class History: ObservableObject {
     }
 
     func forget(_ key: String) {
+        // Its page's icon is a trace of the visit too.
+        if let url = visits[key].flatMap({ URL(string: $0.url) }) { Favicons.shared.forget(url) }
         visits[key] = nil
         forgetText(for: key)
         save()
@@ -365,10 +389,17 @@ final class History: ObservableObject {
     /// What the field should draw greyed out after the caret: the rest of the
     /// best match, or nothing if it doesn't carry on from what was typed.
     func completion(for typed: String, among options: [Suggestion]) -> String? {
-        guard !typed.isEmpty, typed.count >= 2 else { return nil }
-        for option in options {
+        guard !typed.isEmpty else { return nil }
+        // One letter finishes only the top row, and only when it is the
+        // front door of a site you have been to: "x" becomes x.com, as in
+        // Safari and Chrome (#696). A room inside a site, a name the app
+        // merely knows, or a lower row waits for a second letter.
+        let single = typed.count == 1
+        if single, let first = options.first?.kind, first != .visited { return nil }
+        for option in single ? Array(options.prefix(1)) : options {
             for (key, target) in History.endings(of: option) {
                 guard key.count >= typed.count else { continue }
+                if single, key.contains("/") || key.contains("?") || key.contains("#") { continue }
                 let prefix = String(key.prefix(typed.count))
                 guard prefix.caseInsensitiveCompare(typed) == .orderedSame else { continue }
                 let rest = String(key.dropFirst(typed.count))
@@ -456,13 +487,12 @@ final class History: ObservableObject {
 
     // MARK: - the file
 
-    private static var folder: URL { Store.folder }
-    private static var file: URL { Store.file("history.json") }
+    private var file: URL { Store.file(fileName) }
 
     private func load() {
-        guard let data = try? Data(contentsOf: History.file) else { return }
+        guard let data = try? Data(contentsOf: file) else { return }
         guard let list = try? JSONDecoder().decode([Visit].self, from: data) else {
-            Store.quarantine(History.file)
+            Store.quarantine(file)
             return
         }
         // Keys written by an older Search can meet under the new rule:
@@ -535,16 +565,17 @@ final class History: ObservableObject {
     /// Coalesced: a busy minute of browsing writes the file once, not thirty
     /// times, and never on the main thread.
     private func save() {
-        guard !saving else { return }
+        guard !saving, !retired else { return }
         saving = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
             saving = false
+            guard !retired else { return }
             let now = Date()
             // A cap, so the file can't grow without end. What goes is what has
             // been visited least and longest ago.
             let snapshot = self.visits
-            let file = History.file
+            let file = self.file
             Disk.write(file) {
                 let list = Array(snapshot.values.sorted { History.score($0, now: now) > History.score($1, now: now) }.prefix(2_000))
                 return try? JSONEncoder().encode(list)

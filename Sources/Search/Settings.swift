@@ -8,6 +8,10 @@ import SwiftUI
 struct SettingsPanel: View {
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
+    /// The section the tab's address names (search://settings/privacy),
+    /// when Settings is a tab: asked for again, it moves there.
+    var asked: String? = nil
+    @Environment(\.asTab) private var asTab
 
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var shield = Shield.shared
@@ -56,6 +60,36 @@ struct SettingsPanel: View {
     private static let height: CGFloat = 500
 
     var body: some View {
+        if asTab { tabbed } else { card }
+    }
+
+    /// In a tab of its own (see InternalPages.swift): the sections down the
+    /// left, the window's whole height, and the section down the middle of
+    /// the rest, as wide as on the card.
+    private var tabbed: some View {
+        HStack(spacing: 0) {
+            pages
+            Rectangle().fill(Palette.hairline).frame(width: 1)
+            content
+                .padding(.top, 26)
+                .frame(maxWidth: SettingsPanel.width - SettingsPanel.rail + 60)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { follow(asked) }
+        .onChange(of: asked) { _, asked in follow(asked) }
+        .onChange(of: page) { _, page in
+            Store.settings.set(page.rawValue, forKey: "settings.page")
+            browser.settingsMoved(to: page)
+        }
+    }
+
+    private func follow(_ asked: String?) {
+        guard let asked, let wanted = Page(rawValue: asked), wanted != .ai || AI.shipped, wanted != page else { return }
+        page = wanted
+    }
+
+    private var card: some View {
         HStack(spacing: 0) {
             pages
             Rectangle().fill(Palette.hairline).frame(width: 1)
@@ -134,7 +168,9 @@ struct SettingsPanel: View {
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Spacer()
-                Door(icon: "xmark", help: "Done   esc") { browser.tuning = false }
+                if !asTab {
+                    Door(icon: "xmark", help: "Done   esc") { browser.tuning = false }
+                }
             }
             .padding(.bottom, 16)
 
@@ -144,9 +180,10 @@ struct SettingsPanel: View {
                     case .general: general
                     case .tabs:
                         tabs
+                        ProfilesSettings(browser: browser)
                         if !prefs.sidebar { toolbar }
                     case .routing: RoutingPage(browser: browser)
-                    case .shortcuts: ShortcutsPage(browser: browser, store: .shared)
+                    case .shortcuts: ShortcutsPage(browser: browser, store: .shared, prefs: prefs)
                     case .extensions: ExtensionsPage(browser: browser)
                     case .passwords: passwords
                     case .downloads: downloads
@@ -193,10 +230,7 @@ struct SettingsPanel: View {
             // Coming from another browser, now or any time later: the same
             // sheet as File › Bring Things Over… and the Welcome's.
             Line("Bring things over", "Bookmarks, history, passwords and extensions from another browser on this Mac, or from a file it exported") {
-                Pill("Bring Things Over…") {
-                    browser.tuning = false
-                    browser.bringingIn = ""
-                }
+                Pill("Bring Things Over…") { browser.lead(to: InternalPage(.importing)) }
             }
             Rule()
             // What ⌘T opens to, and the way back after an extension took
@@ -212,6 +246,10 @@ struct SettingsPanel: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .fixedSize()
+            }
+            Rule()
+            Line("Suggestions from your search engine", suggestDetail) {
+                Switch(on: $prefs.engineSuggests)
             }
             if prefs.engine == .custom {
                 ZStack(alignment: .leading) {
@@ -293,8 +331,23 @@ struct SettingsPanel: View {
                 .padding(.bottom, 6)
             }
             Rule()
+            Line("Websites in the side panel", "Keep a site such as Claude or ChatGPT beside the page: View › Side Panel, or right-click a tab › Open in Side Panel. Signed in as the space's tabs are") {
+                Switch(on: $prefs.sitesInPanel)
+            }
+            Rule()
+            Line("Confirm before quitting", "Ask before ⌘Q or Quit Search closes the browser") {
+                Switch(on: $prefs.confirmsQuit)
+            }
+            Rule()
             Line("Appearance", "Light, dark, or whatever the Mac is doing — pages follow it too") {
                 Segmented(options: Look.allCases.map { ($0, $0.title) }, selection: $prefs.look)
+            }
+            // Only where it can do something: in Light, nothing is darkened.
+            if prefs.look != .light {
+                Rule()
+                Line("Darken pages that stay light", "Sites with a dark look of their own already follow it; the rest are darkened too. ⇧⌘D for the site you're on, ⌥⇧⌘D to pause everywhere") {
+                    Switch(on: $prefs.darkensPages)
+                }
             }
             Rule()
             Line("Page zoom", "Where every site starts. ⌘+ and ⌘− are still remembered for each site.") {
@@ -306,8 +359,16 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.autocorrect)
             }
             Rule()
-            Line("Peek at a link with a shift-click", "Its page opens in a panel over the one you're reading. Escape puts it away; the other button keeps it as a tab") {
+            Line("Peek at a link with a \(prefs.peekClick.title.lowercased())", "Its page opens in a panel over the one you're reading. Escape puts it away; the other button keeps it as a tab") {
                 Switch(on: $prefs.peeksLinks)
+            }
+            Rule()
+            Line("Read the site's own Markdown", "When a page has a Markdown copy, Reading mode (⇧⌘R) shows that instead of working the article out. Most docs sites publish one") {
+                Switch(on: $prefs.readsTwins)
+            }
+            Rule()
+            Line("Reading mode follows light and dark", "In a dark window the article is light on dark. A small switch in its corner makes an article light, dark or as the window is, and is kept for the next one") {
+                Switch(on: $prefs.readerFollowsLook)
             }
             Rule()
             Line("Open links from other apps in a small window", "To read and close, or keep with Open in Search (⌘O)") {
@@ -334,15 +395,30 @@ struct SettingsPanel: View {
                 Segmented(options: FastPages.allCases.map { ($0, $0.title) }, selection: $prefs.fastPages)
             }
             Rule()
+            Line("Reduce animations in Low Power Mode", "Quicker, simpler motion while the Mac is saving power or running hot") {
+                Switch(on: $prefs.lightMotion)
+            }
+            Rule()
             Line("Hold a swipe to pick from history", "Swipe back or forward and keep your fingers down: the pages that way appear, and moving up or down picks one to go to") {
                 Switch(on: $prefs.holdsHistory)
+            }
+            Rule()
+            Line("The floating video", "Search's own window floats a video without a click and keeps its page alive in it. Picture in picture is macOS's, the one Safari uses, with the system's controls") {
+                Segmented(options: FloatStyle.allCases.map { ($0, $0.title) }, selection: $prefs.floatStyle)
             }
             Rule()
             Line("Flick the floating video to a corner", "Two fingers on it send it to the corner or edge they point at, instead of pushing it along; a strong swipe at the side of the screen it is against tucks it in there, a sliver left to bring it back by. Dragging still puts it anywhere") {
                 Switch(on: $prefs.floatFlicks)
             }
             Rule()
-            Line("Videos wait for a click", "Videos don't start by themselves, even without sound; they play when you press play. Tabs already open follow once closed and opened again, or after they've slept") {
+            if PageTranslator.available {
+                Line("Translate pages on this Mac", "Translate Page in a page's right-click menu, into your Mac's language. Done by macOS itself, on this Mac: nothing is sent anywhere. Each language is downloaded once, the first time") {
+                    Switch(on: $prefs.translatesPages)
+                }
+                if prefs.translatesPages { TranslateLanguageList(prefs: prefs) }
+                Rule()
+            }
+            Line("Videos wait for a click", "Videos don't start by themselves, even without sound; they play when you press play. Tabs already open follow from their next page, or once reloaded") {
                 Switch(on: $prefs.waitsForPlay)
             }
             Rule()
@@ -352,6 +428,10 @@ struct SettingsPanel: View {
             Rule()
             Line("Float the video when you switch apps", "A video playing on the site you're on comes out into its floating window as another app comes to the front, and goes back into its tab when you return") {
                 Switch(on: $prefs.floatsAway)
+            }
+            Rule()
+            Line("Press Esc twice to leave full screen", "As in Arc: the first press shows a reminder and leaves the video as it is; a second within two seconds leaves its full screen. Holding Escape down counts as one press") {
+                Switch(on: $prefs.escapeTwice)
             }
             Rule()
             Line("Let a script drive Search", "A local socket for testing. Its tabs open beside yours with a flask on them and never take over — see ./bench") {
@@ -384,6 +464,15 @@ struct SettingsPanel: View {
             template: current.template.trimmingCharacters(in: .whitespacesAndNewlines)
         ))
         draft = nil
+    }
+
+    /// Said plainly: turned on, what you type leaves the Mac as you type it.
+    private var suggestDetail: String {
+        let name = prefs.engine.name(custom: prefs.customEngine)
+        guard EngineSuggest.endpoint(for: prefs.engine) != nil else {
+            return "Your engine's suggestions under the address field. A custom engine has none to give, so nothing is sent"
+        }
+        return "What you type in the address field is sent to \(name) as you type, and its suggestions show under it. Never from a private tab, and never an address"
     }
 
     private var searchDetail: String {
@@ -461,12 +550,31 @@ struct SettingsPanel: View {
                 Segmented(options: Glyph.allCases.map { ($0, $0.title) }, selection: $prefs.glyph)
             }
             Rule()
+            Line("Tabs give when pressed", "A tab sinks a little under the pointer while you press it and springs back when you let go, as in Arc") {
+                Switch(on: $prefs.tabsGive)
+            }
+            Rule()
+            Line("Open sized pop-ups in small windows", "A website asking for a window at its own size gets one, instead of a tab. Pop-up blocking still applies") {
+                Switch(on: $prefs.popupWindows)
+            }
+            Rule()
             Line("Show the bookmarks bar", "Your bookmarks in a row above the page, folders opening as menus. It folds away with the tabs") {
                 Switch(on: $prefs.bookmarksBar)
             }
             Rule()
+            Line("Show tab shortcut numbers", "Hold ⌘ to see which tab each ⌘1–9 shortcut selects") {
+                Switch(on: $prefs.showsTabShortcuts)
+            }
+            Rule()
             Line("Show how far you've read", "The tab you're on fills with grey as you scroll down the page") {
                 Switch(on: $prefs.showsReading)
+            }
+            Rule()
+            Line("Show the address on the tab you're on", "Its site in place of its title, so you can see where you are without a click; the title comes back under the pointer. Look-alike names in other alphabets show as they really are, and plain http says Not secure. Off, the tab you're on still says so for those two") {
+                Switch(on: Binding(
+                    get: { prefs.showsAddress },
+                    set: { on in withAnimation(Motion.glide) { prefs.showsAddress = on } }
+                ))
             }
             Rule()
             Line("Sleep tabs you aren't using", "A tab left alone lets its page go and comes back where you left it. Pinned tabs, sound, calls and anything typed stay awake.") {
@@ -479,6 +587,24 @@ struct SettingsPanel: View {
                 }
             }
             Rule()
+            Line("Close tabs you leave alone", "Counted from when you last left the tab, while Search is quit too. Pin a tab, name it or put it in a group to keep it; private tabs, sound, calls and anything typed stay. ⇧⌘T and History bring one back.") {
+                Picker("", selection: $prefs.tabLife) {
+                    ForEach(TabLife.allCases) { life in
+                        Text(life.title).tag(life)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            Rule()
+            Line("Keep selected sites awake", "Adds Keep This Site Awake to the site card. Chosen sites use more memory: they neither sleep nor close automatically, even under memory pressure. Private choices last only in that tab.") {
+                Switch(on: $prefs.keepsSitesAwake)
+                    .accessibilityRepresentation { Toggle("Keep selected sites awake", isOn: $prefs.keepsSitesAwake) }
+                    .focusable()
+                    .onKeyPress(.space) { prefs.keepsSitesAwake.toggle(); return .handled }
+            }
+            Rule()
             Line("Load background tabs when you go to them", "A link opened behind the page, with ⌘-click or the middle button, or a batch of links from another app, waits until you go to its tab. ⇧⌘-click still takes you there at once.") {
                 Switch(on: $prefs.lazyTabs)
             }
@@ -487,15 +613,22 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.newTabAfterLast)
             }
             Rule()
-            Line("Open new tabs at the end", "A new tab, or a link opened in one, goes to the bottom of the list instead of just after the tab you're on.") {
-                Switch(on: Binding(get: { prefs.newTabPlace == .end }, set: { prefs.newTabPlace = $0 ? .end : .next }))
+            Line("New tab position", "After current puts a link beside the tab you're on, and ⌘T's new tab at the end. Pins stay first; a link from a group stays in it.") {
+                Picker("New tab position", selection: $prefs.newTabPlace) {
+                    Text("After current").tag(NewTabPlace.next)
+                    Text(prefs.sidebar ? "Top" : "Leftmost").tag(NewTabPlace.top)
+                    Text(prefs.sidebar ? "Bottom" : "Rightmost").tag(NewTabPlace.end)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
             }
             Rule()
             Line("Search a site from the address field", "Type the start of a site's name, like red or yout, then Tab, and what you type next searches that site. Sites you visit that offer a search join the list.") {
                 Switch(on: $prefs.searchesSites)
             }
             Rule()
-            Line("Start with a fresh window", "Each time Search opens, your pinned tabs are there and last time's other tabs aren't.") {
+            Line("Start with a fresh window", "Each time Search opens, your pinned tabs, tab groups and named tabs are there and last time's other tabs aren't.") {
                 Switch(on: $prefs.startsFresh)
             }
             Rule()
@@ -523,8 +656,20 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.pinsGoHome)
             }
             Rule()
+            Line("A pin's number again goes back", "Press a pin's ⌘ number while you're on that pin and you're back on the tab you were on before it, as a second press does in Arc.") {
+                Switch(on: $prefs.pinNumberGoesBack)
+            }
+            Rule()
+            Line("Pins stay on their site", "As in Arc: a link from a pinned tab to another site opens in a panel over it, and the pin stays on its page. Links within the site go as usual, and ⌘W takes the pin back to the page it was pinned at.") {
+                Switch(on: $prefs.pinsPeek)
+            }
+            Rule()
             Line("Split View", "Show two tabs side by side. Drag a tab onto a page to pair them.") {
                 Switch(on: $prefs.splitView)
+            }
+            Rule()
+            Line("Keys in the tab switcher", "With ⌃ still held in the ⌃Tab switcher, ⌃W closes the tab picked, ⌃R reloads it, ⌃M mutes it, and ⌃O takes a small window into your tabs.") {
+                Switch(on: $prefs.switcherKeys)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
@@ -546,10 +691,7 @@ struct SettingsPanel: View {
         VStack(alignment: .leading, spacing: 18) {
             Card {
                 Line("Your passwords", "In the macOS keychain, shown with Touch ID") {
-                    Pill("Open…") {
-                        browser.tuning = false
-                        browser.managing = true
-                    }
+                    Pill("Open…") { browser.lead(to: InternalPage(.passwords)) }
                 }
                 Rule()
                 Line("Offer to save passwords", savingDetail) {
@@ -580,12 +722,10 @@ struct SettingsPanel: View {
                     }
                 }
             }
+            ApplePasswordsCard(prefs: prefs)
             Card {
                 Line("Bring yours in", "From another browser on this Mac — nothing leaves it") {
-                    Pill("Import…") {
-                        browser.tuning = false
-                        browser.bringingIn = ""
-                    }
+                    Pill("Import…") { browser.lead(to: InternalPage(.importing)) }
                 }
             }
         }
@@ -648,6 +788,7 @@ struct SettingsPanel: View {
                     Switch(on: $prefs.siteNotifications)
                 }
                 NotificationSites()
+                PopupSiteList(prefs: prefs)
             }
             Card {
                 Line("History", "Every address you have been to") {
@@ -697,7 +838,7 @@ struct SettingsPanel: View {
                 }
                 Rule()
                 Line("What's new", "Every version's notes, newest first") {
-                    Pill("What's New…") { browser.notesShowing = true }
+                    Pill("What's New…") { browser.lead(to: InternalPage(.notes)) }
                 }
             }
 
@@ -710,7 +851,7 @@ struct SettingsPanel: View {
                 Rule()
                 Shortcut("⇧⌘V", "Paste and go")
                 Rule()
-                Shortcut("⇧⌘C", "Copy address")
+                Shortcut("⇧⌘C  ⌥⇧⌘C", "Copy address, a clean link")
                 Rule()
                 Shortcut("⌃⇥  ⌘1–9", "Next tab, a tab by its place")
                 Rule()
