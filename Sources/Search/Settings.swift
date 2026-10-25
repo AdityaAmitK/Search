@@ -33,12 +33,13 @@ struct SettingsPanel: View {
     @MainActor static var arcBefore: Preferences.ArcSetup?
 
     enum Page: String, CaseIterable, Identifiable {
-        case general, appearance, tabs, browsing, spaces, passwords, privacy, ai, extensions, keyboard, about
+        case general, appearance, tabs, routing, browsing, spaces, passwords, privacy, ai, extensions, keyboard, about
         var id: String { rawValue }
         var title: String {
             switch self {
             case .general: return "General"
             case .appearance: return "Appearance"
+            case .routing: return "Routing"
             case .tabs: return "Tabs"
             case .browsing: return "Browsing"
             case .spaces: return "Spaces & Pins"
@@ -54,6 +55,7 @@ struct SettingsPanel: View {
             switch self {
             case .general: return "gearshape"
             case .appearance: return "paintbrush"
+            case .routing: return "arrow.triangle.branch"
             case .tabs: return "square.on.square"
             case .browsing: return "globe"
             case .spaces: return "square.stack"
@@ -306,6 +308,8 @@ struct SettingsPanel: View {
     @ViewBuilder
     private func section(_ page: Page) -> some View {
         switch page {
+        case .routing:
+            RoutingPage(browser: browser)
         case .about:
             aboutHeader
             groups(of: page)

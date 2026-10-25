@@ -607,7 +607,7 @@ final class Tab: ObservableObject, Identifiable {
     var onStoreAdd: ((Tab) -> Void)?
     /// The middle button was let go over a link. The browser opens it in a
     /// tab of its own beside this one, without leaving the page you are on.
-    var onMiddleClick: ((Tab, URL) -> Void)?
+    var onMiddleClick: ((Tab, URL, Bool) -> Void)?
     /// A page on this Mac's link to another file, clicked: here, or in a
     /// tab of its own for target="_blank" (see MiddleRelay).
     var onFileLink: ((Tab, URL, Bool) -> Void)?
@@ -1935,10 +1935,10 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
       // The link is found now: once the event is over its path is empty.
       window.addEventListener('auxclick', function (e) {
         if (e.button !== 1 || !e.isTrusted) return;
-        var href = link(e);
-        if (!href) return;
+        var clicked = link(e);
+        if (!clicked) return;
         setTimeout(function () {
-          if (!e.defaultPrevented) window.webkit.messageHandlers.officeMiddle.postMessage({ href: href });
+          if (!e.defaultPrevented) window.webkit.messageHandlers.officeMiddle.postMessage(clicked);
         }, 0);
       }, true);
       // A page on this Mac linking to another file. WebKit lets a file page
@@ -1982,7 +1982,7 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
             try { href = href.baseVal ? new URL(href.baseVal, el.baseURI).href : ''; } catch (_) { href = ''; }
           }
           if (!href) continue;
-          return href;
+          return { href: href, download: el.hasAttribute('download') };
         }
         return '';
       }
@@ -2017,7 +2017,7 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
         else { return }
         MainActor.assumeIsolated { [weak self] in
             guard let self, let tab else { return }
-            tab.onMiddleClick?(tab, url)
+            tab.onMiddleClick?(tab, url, body["download"] as? Bool ?? false)
         }
     }
 }
@@ -2047,6 +2047,8 @@ final class PageView: WKWebView {
                 front.title = "Open Link in New Tab and Go to It"
                 front.keyEquivalentModifierMask = .option
                 front.isAlternate = true
+                front.target = self
+                front.action = #selector(openLinkInFront(_:))
                 menu.insertItem(front, at: index + 1)
             }
             openLink = (item.target, item.action)
@@ -2155,10 +2157,23 @@ final class PageView: WKWebView {
     /// second and is used up by the first tab asked for.
     private var openLink: (target: AnyObject?, action: Selector?) = (nil, nil)
     private var behindSince: Date?
+    private var linkMenuSince: Date?
+
+    @objc private func openLinkInFront(_ item: NSMenuItem) {
+        guard let action = openLink.action else { return }
+        linkMenuSince = Date()
+        NSApp.sendAction(action, to: openLink.target, from: item)
+    }
+
+    func takeLinkMenu() -> Bool {
+        defer { linkMenuSince = nil }
+        return linkMenuSince.map { Date().timeIntervalSince($0) < 1 } ?? false
+    }
 
     @objc private func openLinkBehind(_ item: NSMenuItem) {
         guard let action = openLink.action else { return }
         behindSince = Date()
+        linkMenuSince = Date()
         NSApp.sendAction(action, to: openLink.target, from: item)
     }
 

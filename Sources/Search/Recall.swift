@@ -74,9 +74,7 @@ struct HistoryPanel: View {
                                         Row(
                                             trace: trace,
                                             go: {
-                                                // In this tab, as Chrome's
-                                                // history does: Back returns here.
-                                                (browser.pageTab(.history) ?? browser.active)?.go(to: trace.url)
+                                                browser.navigateInternal(trace.url, in: browser.pageTab(.history) ?? browser.active)
                                             },
                                             forget: {
                                                 browser.history.forget(trace.key)

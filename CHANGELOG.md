@@ -11,6 +11,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ## Unreleased
 
+### Added
+
+- Optional domain-to-Space routing, scoped to each window’s profile, in Settings › Routing. Starts disabled with no rules; external links use the destination’s session from the first request. Internal links stay current unless Ask or routing is selected (#721).
+
 ### Held back
 
 Not in this version, kept on main for a later one:

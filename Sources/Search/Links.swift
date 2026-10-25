@@ -112,6 +112,13 @@ final class Links: NSObject, NSApplicationDelegate {
     /// had shown once.
     func applicationWillFinishLaunching(_ notification: Notification) {
         Links.watchForTrouble()
+        // Probe launches cannot accept outside Apple Events. Seed their own
+        // isolated URLs before the first window hands over the cold queue.
+        if Store.testing {
+            for text in Store.settings.stringArray(forKey: "routing.probe.launchURLs") ?? [] {
+                if let url = URL(string: text) { Links.take(url) }
+            }
+        }
         NSAppleEventManager.shared().setEventHandler(
             self, andSelector: #selector(handle(getURL:reply:)),
             forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL)
@@ -211,6 +218,20 @@ final class Links: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { Browsers.newWindow() }
     }
 
+    /// Only addresses handed over by another application use this policy.
+    @MainActor
+    private static func prepareExternal(_ url: URL, in browser: Browser) -> Bool {
+        guard let rule = Routing.shared.config.match(url, profileID: browser.profileID) else { return true }
+        guard browser.prefs.usesSpaces,
+              let destination = browser.spaces.first(where: { $0.id == rule.spaceID }) else {
+            browser.announce("Link not opened: enable Spaces and choose a destination in Settings → Routing")
+            return false
+        }
+        // Switch before arrive/open constructs the tab's WebKit data store.
+        browser.switchSpace(to: destination.id)
+        return browser.spaceID == destination.id
+    }
+
     /// The browser, once it has a window. Anything that came earlier is
     /// handed over now — but none of it before the window is on screen.
     ///
@@ -228,6 +249,7 @@ final class Links: NSObject, NSApplicationDelegate {
             // The window in front's browser, or a window brought back for it:
             // the link lands where you are, not in the first window.
             let browser = Browsers.ensureWindow()
+            guard prepareExternal(url, in: browser) else { return }
             browser.arrive(url)
             // Put away in the Dock, it stayed there: bringing a window to the
             // front doesn't take it out (#95).
@@ -239,11 +261,12 @@ final class Links: NSObject, NSApplicationDelegate {
         waiting = []
         guard let first = early.first else { return }
         onceShown { [weak browser] in
-            browser?.arrive(first)
+            if let browser, prepareExternal(first, in: browser) { browser.arrive(first) }
             comeForward()
             for (n, url) in early.dropFirst().enumerated() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 * Double(n + 1)) { [weak browser] in
-                    browser?.open(url, foreground: false, atEnd: true, mayWait: true)
+                    guard let browser, prepareExternal(url, in: browser) else { return }
+                    browser.open(url, foreground: false, atEnd: true, mayWait: true)
                 }
             }
         }
@@ -306,11 +329,11 @@ final class Links: NSObject, NSApplicationDelegate {
     /// every time. Open in Search is what brings it now.
     @MainActor
     private static func little(_ url: URL) -> Bool {
-        guard Shared.prefs.littleLinks else { return false }
         if !launched { Browsers.keepAway() }
         // The space and sign-ins of the window in front, on screen or not.
         let browser = Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
             ?? Browsers.primary ?? SceneSlot.shared.browser
+        guard Routing.shared.config.match(url, profileID: browser.profileID) == nil, Shared.prefs.littleLinks else { return false }
         LittleWindow.show(url, for: browser)
         return true
     }
