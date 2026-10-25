@@ -18,7 +18,9 @@ import CryptoKit
 // are defined there, and every call becomes a native message to this app,
 // which answers from its own bookmarks, history and downloads. To the
 // extension it looks like Chrome. The files are changed after the store's
-// signature has been checked, and only by adding.
+// signature has been checked, and only by adding — but for request rules
+// WebKit would carry out beyond the sites they name, which are taken out
+// (see misreadByWebKit).
 
 @available(macOS 15.4, *)
 @MainActor
@@ -140,6 +142,8 @@ enum ExtensionShims {
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .withoutEscapingSlashes])
         try data.write(to: manifestURL, options: .atomic)
 
+        dropMisreadRules(manifest, in: folder)
+
         // Every page it ships — popup, options, background page, side panel —
         // and scripts a content script may insert into a website. WebKit
         // decodes those in the site's encoding unless the resource says
@@ -180,6 +184,50 @@ enum ExtensionShims {
                 html = tag + html
             }
             try? html.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: - request rules WebKit would misread
+
+    /// A redirect or header rule with a pattern (`regexFilter`) beside a
+    /// list of sites (`requestDomains`). WebKit drops the list from such a
+    /// rule and carries it out on every address the pattern matches. Since
+    /// Search grants "declarativeNetRequestWithHostAccess" with
+    /// "declarativeNetRequest" (Norma's block page), WebKit carries out
+    /// redirects, and uBlock Origin Lite's strict blocking — `^https?://.*`
+    /// beside thousands of named sites, to its warning page — took every
+    /// page ~30 s after launch, leaving the tab blank (#709). Such a rule
+    /// is left out: nothing is rewritten into something the extension
+    /// didn't write, and nothing acts beyond what it named. A block or an
+    /// allow of that shape is left as WebKit reads it, as before. The shim
+    /// leaves out the same rules added while the extension runs (`misread`).
+    nonisolated static func misreadByWebKit(_ rule: [String: Any]) -> Bool {
+        guard let condition = rule["condition"] as? [String: Any],
+              condition["regexFilter"] is String, condition["requestDomains"] != nil,
+              let type = (rule["action"] as? [String: Any])?["type"] as? String
+        else { return false }
+        return type == "redirect" || type == "modifyHeaders"
+    }
+
+    /// The rulesets a manifest declares, without the rules WebKit would
+    /// misread. Only ever takes rules out; a ruleset with none is left as
+    /// it is, so preparing again changes nothing.
+    nonisolated static func dropMisreadRules(_ manifest: [String: Any], in folder: URL) {
+        guard let dnr = manifest["declarative_net_request"] as? [String: Any],
+              let resources = dnr["rule_resources"] as? [[String: Any]] else { return }
+        for resource in resources {
+            // Only a file with both words in it is read as rules: a blocker
+            // ships tens of megabytes of them.
+            guard let name = resource["path"] as? String, let url = inside(name, of: folder),
+                  let data = try? Data(contentsOf: url),
+                  data.range(of: Data("regexFilter".utf8)) != nil, data.range(of: Data("requestDomains".utf8)) != nil,
+                  let rules = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+            else { continue }
+            let kept = rules.filter { !(($0 as? [String: Any]).map(misreadByWebKit) ?? false) }
+            guard kept.count < rules.count,
+                  let written = try? JSONSerialization.data(withJSONObject: kept, options: [.withoutEscapingSlashes])
+            else { continue }
+            try? written.write(to: url, options: .atomic)
         }
     }
 
@@ -2299,6 +2347,11 @@ enum ExtensionShims {
       // address, and without the resource types it has no name for.
       const unknownTypes = new Set(["webtransport", "webbundle", "object"]);
       const base = (() => { try { return runtime.getURL(""); } catch (e) { return ""; } })();
+      const misread = (r) => {
+        const c = r && r.condition, type = r && r.action && r.action.type;
+        return !!(c && typeof c.regexFilter === "string" && c.requestDomains !== undefined
+          && (type === "redirect" || type === "modifyHeaders"));
+      };
       const mendRule = (rule) => {
         if (!rule || typeof rule !== "object") return rule;
         const r = { ...rule, action: rule.action && { ...rule.action }, condition: rule.condition && { ...rule.condition } };
@@ -2312,6 +2365,16 @@ enum ExtensionShims {
           if (!c.resourceTypes.length) return null;
         }
         if (c && Array.isArray(c.excludedResourceTypes)) c.excludedResourceTypes = c.excludedResourceTypes.filter((t) => !unknownTypes.has(t));
+        // A pattern beside a list of sites: WebKit drops the list and takes
+        // the rule for every address its pattern matches (see
+        // misreadByWebKit in ExtensionShims.swift). A redirect or a header
+        // change of that shape is left out rather than carried out
+        // everywhere: uBlock Origin Lite's strict blocking, `^https?://.*`
+        // for thousands of named sites, sent every page to its warning (#709).
+        if (misread(r)) {
+          try { native("debug.error", ["declarativeNetRequest: " + r.action.type + " rule " + r.id + " left out — WebKit would take its pattern for every site, not the ones it names"]).catch(() => {}); } catch (x) {}
+          return null;
+        }
         return r;
       };
       if (dnr && typeof dnr.isRegexSupported === "function") {

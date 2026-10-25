@@ -103,7 +103,8 @@ struct SearchApp: App {
                 Divider()
                 Button("Find on Page…") { browser.openFind() }
                     .shortcut("edit.find")
-                    .disabled(!(browser.active?.isWeb ?? false))
+                    // On the Settings tab, ⌘F finds a setting.
+                    .disabled(!(browser.active?.isWeb ?? false) && browser.active?.page?.kind != .settings)
                 Button("Find Next") { browser.look(forward: true) }
                     .shortcut("edit.findNext")
                     .disabled(!browser.finding)
@@ -122,6 +123,14 @@ struct SearchApp: App {
                             set: { _ in browser.toggleSubstitution(kind) }
                         ))
                     }
+                }
+                // Moved here from Settings, as Safari has it. WebKit reads it
+                // once, so it counts from the next page on.
+                Menu("Spelling and Grammar") {
+                    Toggle("Correct Spelling Automatically", isOn: Binding(
+                        get: { browser.prefs.autocorrect },
+                        set: { browser.prefs.autocorrect = $0 }
+                    ))
                 }
             }
             CommandGroup(replacing: .toolbar) {
@@ -144,6 +153,13 @@ struct SearchApp: App {
                         Text(glyph.title).tag(glyph)
                     }
                 }
+                // Every group of the space on screen, folded or opened at once.
+                Button("Fold All Groups") { browser.foldAllGroups(true) }
+                    .shortcut("view.foldGroups")
+                    .disabled(!browser.canFoldAllGroups)
+                Button("Unfold All Groups") { browser.foldAllGroups(false) }
+                    .shortcut("view.unfoldGroups")
+                    .disabled(!browser.canUnfoldAllGroups)
                 Divider()
                 Button("Reload Page") { browser.reload() }
                     .shortcut("view.reload")
@@ -571,10 +587,10 @@ struct ContentView: View {
     private var chrome: CGSize {
         let bar = barShown ? BookmarksBar.height : 0
         if cards {
-            return CGSize(width: sidebar ? browser.prefs.sideWidth : Metrics.cardGap,
+            return CGSize(width: sidebar ? browser.prefs.columnWidth : Metrics.cardGap,
                           height: barShown ? bar : Metrics.cardGap)
         }
-        return CGSize(width: sidebar ? browser.prefs.sideWidth : 0, height: band + bar)
+        return CGSize(width: sidebar ? browser.prefs.columnWidth : 0, height: band + bar)
     }
 
     /// The page as a card on the window's ground: with the tabs down the
@@ -704,8 +720,8 @@ struct ContentView: View {
                 // Centred on the page, not on the window. The column of tabs
                 // is not what the field is standing over, and dimming it along
                 // with the page says otherwise.
-                .padding(.leading, sidebar && !sideOnRight ? browser.prefs.sideWidth : 0)
-                .padding(.trailing, sidebar && sideOnRight ? browser.prefs.sideWidth : 0)
+                .padding(.leading, sidebar && !sideOnRight ? browser.prefs.columnWidth : 0)
+                .padding(.trailing, sidebar && sideOnRight ? browser.prefs.columnWidth : 0)
                 .transition(.scale(scale: 0.97).combined(with: .opacity))
         }
     }
@@ -808,7 +824,7 @@ struct ContentView: View {
             .onChange(of: browser.sidePosition) { _, _ in
                 DispatchQueue.main.async { Lights.refresh(window); measureLights() }
             }
-            .onChange(of: browser.prefs.sideWidth) { _, _ in
+            .onChange(of: browser.prefs.columnWidth) { _, _ in
                 DispatchQueue.main.async { Lights.refresh(window); measureLights() }
             }
             // Stepping away to another app: macOS draws its own resting
@@ -1075,9 +1091,9 @@ struct ContentView: View {
         // its three doors sit on the lights' line.
         Lights.keep(window, centreX: { window in
             browser.prefs.sidebar && browser.sidePosition == .right
-                ? window.frame.width - browser.prefs.sideWidth + Lights.centre.x
+                ? window.frame.width - browser.prefs.columnWidth + Lights.centre.x
                 : Lights.centre.x
-        }) { measureLights() }
+        }, vertical: { _ in browser.prefs.iconColumn }) { measureLights() }
         DispatchQueue.main.async { measureLights() }
 
         // The traffic lights are drawn — measured, they paint themselves — but
@@ -1377,6 +1393,18 @@ struct ContentView: View {
             // One step at a time: the list first, then the field.
             if browser.picked != nil {
                 browser.picked = nil
+                return true
+            }
+            // Something typed into a new tab: Escape clears it first, the
+            // tab staying where it is, as in Arc and Safari; the next Escape
+            // finds the tab unused and takes it away (below). Before, a typed
+            // word left Escape with nothing to do on a new tab.
+            if let blank = browser.active, blank.isBlank, browser.editingTab == nil,
+               !browser.typed.isEmpty || browser.siteChip != nil {
+                browser.siteChip = nil
+                browser.picked = nil
+                browser.typed = ""
+                blank.draft = ""
                 return true
             }
             // A new tab never sent anywhere is itself what is open: Escape

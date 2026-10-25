@@ -221,7 +221,7 @@ final class Links: NSObject, NSApplicationDelegate {
     /// Only addresses handed over by another application use this policy.
     @MainActor
     private static func prepareExternal(_ url: URL, in browser: Browser) -> Bool {
-        guard let rule = Routing.shared.config.match(url) else { return true }
+        guard let rule = Routing.shared.config.match(url, profileID: browser.profileID) else { return true }
         guard browser.prefs.usesSpaces,
               let destination = browser.spaces.first(where: { $0.id == rule.spaceID }) else {
             browser.announce("Link not opened: enable Spaces and choose a destination in Settings → Routing")
@@ -329,11 +329,11 @@ final class Links: NSObject, NSApplicationDelegate {
     /// every time. Open in Search is what brings it now.
     @MainActor
     private static func little(_ url: URL) -> Bool {
-        guard Routing.shared.config.match(url) == nil, Shared.prefs.littleLinks else { return false }
         if !launched { Browsers.keepAway() }
         // The space and sign-ins of the window in front, on screen or not.
         let browser = Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
             ?? Browsers.primary ?? SceneSlot.shared.browser
+        guard Routing.shared.config.match(url, profileID: browser.profileID) == nil, Shared.prefs.littleLinks else { return false }
         LittleWindow.show(url, for: browser)
         return true
     }

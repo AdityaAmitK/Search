@@ -126,6 +126,10 @@ enum Web {
         // Sound waits for a click, as everywhere; video too when Settings
         // says videos wait (Never Auto-Play, in Safari's words).
         config.mediaTypesRequiringUserActionForPlayback = Web.playback
+        MainActor.assumeIsolated {
+            PrivacySignal.apply(to: config, shy: shy)
+            ClickIDs.apply(to: config.preferences, shy: shy)
+        }
         if Store.testing, !Store.measuring { config.preferences.inactiveSchedulingPolicy = .none }
         inspector(config.preferences)
         NativePiP.allow(config.preferences)
@@ -584,7 +588,7 @@ final class Tab: ObservableObject, Identifiable {
     /// is, in the web view's points, or nil when it has left. Then whether
     /// it goes with a password, and whether it is a first step's name box,
     /// which takes the name alone.
-    var onField: ((Tab, CGRect?, Bool, Bool) -> Void)?
+    var onField: ((Tab, CGRect?, Bool, Bool, Bool) -> Void)?
     /// The site the sign-in was sent from — not the one it landed on —
     /// then the name and the password, and whether that page came over
     /// plain http.
@@ -851,6 +855,7 @@ final class Tab: ObservableObject, Identifiable {
         // made with the tab, often long before its page, and a site or an
         // extension can hand over one of its own.
         FrameRate.apply(to: configuration.preferences)
+        ClickIDs.apply(to: configuration.preferences, shy: shy)
         let web = PageView(frame: .zero, configuration: configuration)
         // The trackpad pinch is WebKit's own: it magnifies what is on screen
         // and lets you move around inside it, the way pinching does everywhere
@@ -1124,6 +1129,12 @@ final class Tab: ObservableObject, Identifiable {
                 WKUserScript(source: dusk, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
             )
         }
+        // YouTube's ads, while Shield is on for the site this tab is on
+        // (see YouTubeAds.swift). Every frame; each script does nothing in a
+        // frame that isn't YouTube's.
+        for script in YouTubeAds.scripts(for: Dusk.host(of: url ?? pageAddress)) {
+            controller.addUserScript(script)
+        }
         guard !css.isEmpty else { return }
         controller.addUserScript(
             WKUserScript(source: Veiling.style(css), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world)
@@ -1145,16 +1156,24 @@ final class Tab: ObservableObject, Identifiable {
     /// `passwords`: a box of a sign-in with a password, not one only for
     /// passkeys. `name`: the name box of a sign-in that asks for the
     /// password on the next page.
-    func fieldFocused(_ rect: CGRect?, passwords: Bool = true, name: Bool = false) {
+    /// The host of the frame the sign-in box with the caret is in, when it
+    /// isn't the page itself: an offer is only made from the page's own site
+    /// (ApplePasswordsOffer). Set before `fieldFocused` by FormRelay.
+    var fieldFrameHost: String?
+
+    /// `wide`: clearly a sign-in's box, so accounts kept for the site's
+    /// other hosts (its registrable domain) may come; otherwise only this
+    /// host's own.
+    func fieldFocused(_ rect: CGRect?, passwords: Bool = true, name: Bool = false, wide: Bool = true) {
         guard let rect else {
-            onField?(self, nil, false, false)
+            onField?(self, nil, false, false, false)
             return
         }
         let zoom = built?.pageZoom ?? 1
         onField?(self, CGRect(
             x: rect.minX * zoom, y: rect.minY * zoom,
             width: rect.width * zoom, height: rect.height * zoom
-        ), passwords, name)
+        ), passwords, name, wide)
     }
 
     /// The name a sign-in that asks for it first was just sent, for the

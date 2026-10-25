@@ -758,6 +758,9 @@ final class Bench {
                 "sidebar": browser.prefs.sidebar,
                 "sidePosition": browser.sidePosition.rawValue,
                 "sideWidth": Double(browser.prefs.sideWidth),
+                // The column as drawn, and whether it is icons only.
+                "columnWidth": Double(browser.prefs.columnWidth),
+                "sideIcons": browser.prefs.sideIcons,
                 "appearance": NSApp.appearance?.name.rawValue ?? "system",
                 "key": NSApp.keyWindow.map { "\(type(of: $0)) “\($0.title)”" } ?? "",
                 // What the keyboard goes to in the key window, or the browser's: a find field,
@@ -1510,7 +1513,9 @@ final class Bench {
             // passwords out of the keychain (the test world's own, by label).
             guard Store.testing else { answer(["error": "passwords only works on a --test run"]); return }
             if let filter = request["filter"] as? String { browser.hunting = filter }
-            browser.relist()
+            // "shown": the list as the page holds it now, not read again,
+            // so a route to the page that never read it shows as empty.
+            if request["shown"] as? Bool != true { browser.relist() }
             if request["remove"] as? Bool == true { browser.forgetShown() }
             // Answered once the removals, off the main thread, are done.
             func settled() {
@@ -1591,6 +1596,27 @@ final class Bench {
                             "active": browser.active?.address?.absoluteString ?? "", "picture": shot])
                 }
             }
+
+        case "settings":
+            // Settings as SettingsIndex has it (Tests/settings_layout.py):
+            // every row with its section, group and keys; what Find a
+            // setting finds for some words; a merged control moved as its
+            // row moves it; the merged values read back. Test runs only.
+            guard Store.testing else { answer(["error": "settings only works on a --test run"]); return }
+            if let id = request["set"] as? String {
+                guard let value = request["value"], SettingsIndex.apply(id, value, to: browser.prefs) else {
+                    answer(["error": "settings set ID VALUE: unknown id or value"]); return
+                }
+            }
+            var reply: [String: Any] = ["values": SettingsIndex.values(browser.prefs),
+                                        "settingsPage": browser.settingsPage.rawValue]
+            if let words = request["find"] as? String {
+                reply["found"] = SettingsIndex.find(words).map(SettingsIndex.describe)
+            } else {
+                reply["items"] = SettingsIndex.items.map(SettingsIndex.describe)
+                reply["pages"] = SettingsPanel.Page.blocks.flatMap { $0 }.map(\.rawValue)
+            }
+            answer(reply)
 
         case "menus":
             // Every menu of the menu bar, by title, after SwiftUI has filled
@@ -1985,12 +2011,104 @@ final class Bench {
             let users = Vault.all().map(\.user)
             guard let list = browser.suggesting else { answer(["shown": false, "offer": offer, "kept": users.count, "users": users]); return }
             let rows = list.passkeys.map { ["passkey": $0.name] } + list.logins.map { ["login": $0.user] }
+            if let press = request["press"] as? [Double], press.count == 2 {
+                // A press and a release at a point of the window, from its
+                // top-left, handed to whatever the window says is there — the
+                // way a click on a row reaches the list, without the pointer.
+                guard let window = browser.window, let frame = window.contentView?.superview else {
+                    answer(["error": "no window"]); return
+                }
+                let point = NSPoint(x: press[0], y: Double(window.frame.height) - press[1])
+                guard let target = frame.hitTest(frame.convert(point, from: nil)) else { answer(["error": "nothing there"]); return }
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    guard let event = NSEvent.mouseEvent(
+                        with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+                    else { continue }
+                    if type == .leftMouseDown { target.mouseDown(with: event) } else { target.mouseUp(with: event) }
+                }
+                // What it reached and who has the keys after: a hidden
+                // probe's SwiftUI button never fires, so the pick itself is
+                // `pick`'s to check.
+                answer(["pressed": "\(type(of: target))", "responder": window.firstResponder.map { "\(type(of: $0))" } ?? ""])
+                return
+            }
             if let pick = request["pick"] as? Int {
                 guard rows.indices.contains(pick) else { answer(["error": "no row \(pick)"]); return }
                 if pick < list.passkeys.count { browser.choose(list.passkeys[pick]) } else { browser.choose(list.logins[pick - list.passkeys.count]) }
             }
-            answer(["shown": true, "rows": rows, "nameOnly": list.nameOnly, "offer": offer, "kept": users.count, "users": users,
-                    "spot": [list.spot.minX, list.spot.minY, list.spot.width, list.spot.height]])
+            var out: [String: Any] = ["shown": true, "rows": rows, "nameOnly": list.nameOnly, "wide": list.wide, "offer": offer, "kept": users.count,
+                                      "users": users, "spot": [list.spot.minX, list.spot.minY, list.spot.width, list.spot.height]]
+            // With Split View's stage, the card as drawn, in the window from
+            // its top-left, and the page-sized box it hangs in.
+            if let drawn = PaneStage.accountCard() {
+                func box(_ r: CGRect) -> [Double] { [r.minX, r.minY, r.width, r.height].map { Double($0) } }
+                out["card"] = box(drawn.card)
+                out["host"] = box(drawn.host)
+            }
+            answer(out)
+
+        case "icons":
+            // The column as icons only (SideIcons.swift): "on" turns it on or
+            // off as Settings' Icons only does; the answer is every tile the
+            // column has drawn — where, in the window from its top-left, and
+            // its tooltip — and the pairs among them. Test runs only.
+            guard Store.testing else { answer(["error": "icons only works on a --test run"]); return }
+            if let on = request["on"] as? Bool { browser.prefs.tabsLayout = on ? .icons : .left }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (request["on"] == nil ? 0 : 0.6)) {
+                let named = Dictionary(uniqueKeysWithValues: browser.tabs.map { ($0.id, Bench.short($0)) })
+                let tiles = IconTiles.frames.compactMap { id, frame -> [String: Any]? in
+                    guard let short = named[id] else { return nil }
+                    return ["id": short, "frame": [frame.minX, frame.minY, frame.width, frame.height].map(Double.init),
+                            "tip": IconTiles.tips[id] ?? "", "pair": IconTiles.pairs[id].flatMap { named[$0] } ?? ""]
+                }.sorted { (($0["frame"] as? [Double])?[1] ?? 0) < (($1["frame"] as? [Double])?[1] ?? 0) }
+                answer([
+                    "on": browser.prefs.iconColumn, "layout": browser.prefs.tabsLayout.rawValue,
+                    "columnWidth": Double(browser.prefs.columnWidth), "sideWidth": Double(browser.prefs.sideWidth),
+                    "tiles": tiles,
+                    "lights": (browser.window ?? Links.window).map(Bench.lights(of:)) ?? [],
+                ])
+            }
+
+        case "appleoffer":
+            // "Use your Apple passwords?" under a sign-in box (ApplePasswordsOffer),
+            // which a test run never shows unless asked here. "asks": offer as a
+            // person would see it, with a stand-in for Apple's helper that
+            // only counts its starts (Apple's own is never run from a test).
+            // "helper": false, as on a Mac without it. "show"/"drop": the row
+            // up under the tab in front, or the list taken down. "use",
+            // "never": its row or its ✕ clicked. "forget": never offered.
+            guard Store.testing else { answer(["error": "appleoffer only works on a --test run"]); return }
+            if let on = request["asks"] as? Bool {
+                ApplePasswordsOffer.benchAsks = on
+                if on, browser.applePasswords.standIn == nil {
+                    let link = StandInLink()
+                    browser.applePasswords = ApplePasswords(makeLink: { link })
+                    browser.applePasswords.standIn = link
+                }
+            }
+            if let on = request["helper"] as? Bool { ApplePasswordsOffer.benchHelper = on }
+            if request["forget"] as? Bool == true { browser.applePasswordsOffer.forget(); browser.prefs.applePasswords = false }
+            if let site = request["show"] as? String, let tab = browser.activeID {
+                browser.testOffer(on: tab, site: site, age: request["age"] as? Double ?? 1)
+            }
+            if request["drop"] as? Bool == true { browser.testOffer(on: nil) }
+            if request["use"] as? Bool == true { browser.useApplePasswords() }
+            if request["never"] as? Bool == true { browser.neverOfferApplePasswords() }
+            let offer = browser.applePasswordsOffer
+            answer([
+                "asks": ApplePasswordsOffer.benchAsks,
+                "offered": offer.offered.sorted(),
+                "unanswered": offer.store.integer(forKey: ApplePasswordsOffer.unansweredKey),
+                "never": offer.store.bool(forKey: ApplePasswordsOffer.neverKey),
+                "retired": offer.retired,
+                "row": browser.suggesting?.appleOffer ?? "",
+                "shown": browser.suggesting != nil,
+                "on": browser.prefs.applePasswords,
+                "pairing": browser.applePairing != nil,
+                "state": "\(browser.applePasswords.state)",
+                "standInStarts": (browser.applePasswords.standIn as? StandInLink)?.starts ?? 0,
+            ])
 
         case "fill":
             // What the window spends on the page scrolling: the page's report
@@ -2078,6 +2196,8 @@ final class Bench {
             // with no scale given. Only on a SEARCH_PROBE run.
             guard Store.testing else { answer(["error": "magnify only works on a --test run"]); return }
             guard let tab = find(request, in: browser), let web = tab.built else { answer(missing(request)); return }
+            // ⌘+ and ⌘−'s kind: the page's own zoom, as View › Zoom In sets it.
+            if let zoom = request["zoom"] as? Double { tab.magnify(to: CGFloat(zoom)) }
             if let scale = request["scale"] as? Double {
                 let x = request["x"] as? Double ?? Double(web.bounds.midX)
                 let y = request["y"] as? Double ?? Double(web.bounds.midY)
@@ -2165,8 +2285,43 @@ final class Bench {
             } else if request["close"] as? Bool == true {
                 guard let group else { answer(["error": "no group “\(named)”"]); return }
                 browser.closeTabGroup(group.id)
+            } else if let all = request["all"] as? String {
+                // Fold All Groups / Unfold All Groups, from the View menu's
+                // item or the space's menu ("via": "view" or "space"), or
+                // straight; nothing is shown.
+                let title = all == "fold" ? "Fold All Groups" : "Unfold All Groups"
+                switch request["via"] as? String {
+                case "view":
+                    guard let view = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu else {
+                        answer(["error": "no View menu"]); return
+                    }
+                    view.delegate?.menuNeedsUpdate?(view)
+                    view.update()
+                    guard let at = view.items.firstIndex(where: { $0.title == title }) else { answer(["error": "no “\(title)” in View"]); return }
+                    view.performActionForItem(at: at)
+                case "space":
+                    let menu = SpaceMenu.menu(for: browser)
+                    guard let at = menu.items.firstIndex(where: { $0.title == title }) else { answer(["error": "no “\(title)” in the space's menu"]); return }
+                    menu.performActionForItem(at: at)
+                default:
+                    browser.foldAllGroups(all == "fold")
+                }
             }
-            answer(["on": browser.prefs.usesTabGroups, "groups": browser.tabGroups.map { group in
+            func items(_ menu: NSMenu?) -> [[String: Any]] {
+                (menu?.items ?? []).filter { $0.title.hasSuffix("All Groups") }.map {
+                    ["title": $0.title, "enabled": $0.isEnabled, "key": $0.keyEquivalent,
+                     "option": $0.keyEquivalentModifierMask.contains(.option),
+                     "command": $0.keyEquivalentModifierMask.contains(.command)] as [String: Any]
+                }
+            }
+            let view = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu
+            view?.delegate?.menuNeedsUpdate?(view!)
+            view?.update()
+            // ⌘[ and ⌘] as this keyboard types them, beside which the two sit.
+            let tabsMenu = NSApp.mainMenu?.items.first(where: { $0.title == "Tabs" })?.submenu
+            let brackets = ["Back", "Forward"].map { title in tabsMenu?.items.first { $0.title == title }?.keyEquivalent ?? "" }
+            answer(["viewItems": items(view), "spaceItems": items(SpaceMenu.menu(for: browser)), "brackets": brackets,
+                    "on": browser.prefs.usesTabGroups, "groups": browser.tabGroups.map { group in
                 ["id": String(group.id.uuidString.prefix(8)).lowercased(), "name": group.name, "collapsed": group.collapsed,
                  "tabs": browser.tabs(in: group.id).map(Bench.short)] as [String: Any]
             }])
@@ -2796,6 +2951,19 @@ final class Bench {
             case "unpeek": browser.peek(false)
             case "fold": browser.toggleFold()
             case "select": if let tab = find(request, in: browser) { browser.select(tab) }
+            case "swipe":
+                // Two fingers along the column, a step every frame for the
+                // first eight, then let go: the next space coming in, as a
+                // hand brings it (dx, default -160).
+                let dx = request["dx"] as? Double ?? -160
+                SpaceSwipe.shared.start(for: browser)
+                SpaceSwipe.shared.began()
+                for step in 0..<8 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + every * Double(step)) {
+                        SpaceSwipe.shared.moved(along: dx / 8)
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + every * 8) { SpaceSwipe.shared.ended() }
             default: break
             }
 
@@ -2960,7 +3128,7 @@ final class Bench {
             guard Store.testing else { answer(["error": "column only works on a --test run — it would picture your tabs"]); return }
             guard let path = request["path"] as? String else { answer(["error": "column needs a path"]); return }
             let height = request["height"] as? Double ?? 600
-            let width = Double(browser.prefs.sideWidth)
+            let width = Double(browser.prefs.columnWidth)
             let host = NSHostingView(rootView: SideBar(browser: browser, prefs: browser.prefs).frame(width: width, height: height))
             host.frame = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -3147,6 +3315,9 @@ final class Bench {
             if let on = request["address"] as? Bool { browser.prefs.showsAddress = on }
             // Settings › Videos wait for a click, moved as its switch moves it.
             if let on = request["waits"] as? Bool, Store.testing { browser.prefs.waitsForPlay = on }
+            // Settings › Privacy's two switches (see Privacy.swift).
+            if let on = request["gpc"] as? Bool, Store.testing { browser.prefs.sendsPrivacySignal = on }
+            if let on = request["clickids"] as? Bool, Store.testing { browser.prefs.removesClickIDs = on }
             if let on = request["folded"] as? Bool { browser.folded = on }
             // The window's own full screen as the chrome sees it, without
             // the window going there: a test run never takes the screen.
@@ -3303,7 +3474,7 @@ final class Bench {
 
         default:
             answer(["error": "unknown command “\(verb)”", "commands": [
-                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "eval", "click", "type", "submit", "shot", "probe", "key", "textcheck", "resize", "hit", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile",
+                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "eval", "click", "type", "submit", "shot", "probe", "key", "textcheck", "resize", "hit", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
             ]])
         }
     }
@@ -4269,4 +4440,17 @@ private final class LoopClock: @unchecked Sendable {
         return ["count": Double(sorted.count), "p50": at(0.5), "p95": at(0.95), "max": sorted.last!,
                 "total": sorted.reduce(0, +)]
     }
+}
+
+
+/// Apple's helper, stood in for in a test run (bench `appleoffer`): it starts,
+/// counts that it did, and never answers, so a pairing begun from the offer
+/// waits for a code that never comes. Apple's own is never run from a test.
+final class StandInLink: AppleLink {
+    var onMessage: (([String: Any]) -> Void)?
+    var onEnd: (() -> Void)?
+    private(set) var starts = 0
+    func start() throws { starts += 1 }
+    func send(_ message: [String: Any]) throws {}
+    func stop() {}
 }

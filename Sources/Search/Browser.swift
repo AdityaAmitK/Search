@@ -390,7 +390,7 @@ final class Browser: NSObject, ObservableObject {
     /// The Settings page it opens on next.
     var settingsPage: SettingsPanel.Page {
         get {
-            let page = SettingsPanel.Page(rawValue: Store.settings.string(forKey: "settings.page") ?? "") ?? .general
+            let page = SettingsPanel.Page.named( Store.settings.string(forKey: "settings.page") ?? "") ?? .general
             return page == .ai && !AI.shipped ? .general : page
         }
         set { Store.settings.set(newValue.rawValue, forKey: "settings.page") }
@@ -449,7 +449,14 @@ final class Browser: NSObject, ObservableObject {
         return "\(index) of \(count)\(result.more ? "+" : "")"
     }
 
+    /// ⌘F on the Settings tab: its Find a setting field takes the keys.
+    @Published var settingsFind = 0
+
     func openFind() {
+        if active?.page?.kind == .settings {
+            settingsFind += 1
+            return
+        }
         guard active?.isWeb == true else { return }
         finding = true
         findFocus += 1
@@ -685,7 +692,19 @@ final class Browser: NSObject, ObservableObject {
     /// The accounts kept for the site whose sign-in box has the caret, and
     /// where that box is — a list hangs from it, and a click fills the form.
     /// Nothing is put into a page until you have pointed at it.
-    @Published private(set) var suggesting: Suggesting?
+    @Published private(set) var suggesting: Suggesting? {
+        didSet {
+            // The offer to use Apple Passwords went without a click on it
+            // or its ✕: counted, and after twice it isn't made again.
+            guard let site = oldValue?.appleOffer, suggesting?.appleOffer != site else { return }
+            if offerAnswered { offerAnswered = false } else { applePasswordsOffer.unanswered() }
+        }
+    }
+    /// The offer's row or its ✕ was clicked: not counted as unanswered.
+    private var offerAnswered = false
+    /// Where "Use your Apple passwords?" was offered and answered
+    /// (ApplePasswordsOffer). A test gives its own.
+    var applePasswordsOffer = ApplePasswordsOffer(store: Store.settings)
 
     struct Suggesting: Equatable {
         let tab: Tab.ID
@@ -707,11 +726,18 @@ final class Browser: NSObject, ObservableObject {
         var appleHost: String?
         /// Apple Passwords is on but not paired: a row to connect.
         var appleConnect = false
+        /// Apple Passwords is off and Search keeps nothing for this site: a
+        /// quiet row at the bottom offers it, once (ApplePasswordsOffer). The
+        /// site it is counted against.
+        var appleOffer: String?
         /// When it came up. A page can put the caret in a sign-in box
         /// itself, an invisible one under the pointer included: a click that
         /// was already on its way is not a choice, so the list takes none for
         /// its first half second, as Chrome's does.
         var shown = Date()
+        /// Hung from a box that is clearly a sign-in's, with the site's
+        /// other hosts' accounts; false: this host's alone.
+        var wide = true
     }
     /// Set once you have picked, so the list doesn't come straight back for
     /// the box you are still in. Cleared when the caret leaves the boxes.
@@ -723,7 +749,7 @@ final class Browser: NSObject, ObservableObject {
     /// The page whose accounts were last looked up for the box the caret is
     /// in. The box reports where it is on every frame of a scroll so the
     /// list can follow it; the keychain is asked once per box, not per frame.
-    private var looked: (tab: Tab.ID, host: String, clear: Bool, name: Bool)?
+    private var looked: (tab: Tab.ID, host: String, clear: Bool, name: Bool, wide: Bool)?
     /// The sign-in box the caret is in, for a list that changes while it is
     /// there: the page's passkeys arrive when they arrive.
     private var field: (tab: Tab.ID, spot: CGRect, passwords: Bool, name: Bool)?
@@ -758,7 +784,7 @@ final class Browser: NSObject, ObservableObject {
     /// Mac's passkeys for a page waiting for one, hang from the box, and go
     /// when the caret does. Nothing is filled on its own — the way Safari
     /// does it, and what a person expects.
-    private func hang(from tab: Tab, _ spot: CGRect?, passwords: Bool, name: Bool = false) {
+    private func hang(from tab: Tab, _ spot: CGRect?, passwords: Bool, name: Bool = false, wide: Bool = true) {
         guard let spot else {
             if field?.tab == tab.id { field = nil; appleAsk += 1 }
             if looked?.tab == tab.id { looked = nil }
@@ -788,18 +814,21 @@ final class Browser: NSObject, ObservableObject {
         // its first half second, which every frame used to start again);
         // a box with no accounts stays without, and the keychain isn't
         // asked again until the caret leaves.
-        if let looked, looked.tab == tab.id, looked.host == host, looked.clear == inTheClear, looked.name == name {
+        if let looked, looked.tab == tab.id, looked.host == host, looked.clear == inTheClear, looked.name == name,
+           looked.wide == wide {
             if var up = suggesting, up.tab == tab.id, up.spot != spot {
                 up.spot = spot
                 suggesting = up
             }
             return
         }
-        looked = (tab.id, host, inTheClear, name)
+        looked = (tab.id, host, inTheClear, name, wide)
         // Passwords only for a box that goes with one: a box for passkeys
-        // alone has no password to put anywhere.
+        // alone has no password to put anywhere. A box that only might be a
+        // sign-in's gets this host's own accounts, never the rest of the
+        // site's: console.cloud.google.com's project name is not Gmail's.
         var kept = prefs.fillsPasswords && passwords
-            ? Vault.kept(matching: host).filter { !inTheClear || $0.clear } : []
+            ? Vault.kept(matching: host, wide: wide).filter { !inTheClear || $0.clear } : []
         // The account whose name the step before was sent with comes first:
         // the password page of a sign-in that asks for the name first.
         if let given = tab.givenName(),
@@ -816,28 +845,40 @@ final class Browser: NSObject, ObservableObject {
             ? ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) : nil
         let apple = applePasswords
         let connect = appleHost != nil && apple.state == .idle && applePairing?.tab != tab.id
+        // Off, and nothing of Search's own for this site: the offer, once.
+        // The row already up under this box stays up while it is there.
+        let offer: String? = {
+            if let up = suggesting, up.tab == tab.id, let site = up.appleOffer, site == Vault.registrable(host) { return site }
+            return applePasswordsOffer.site(
+                for: .init(page: tab.pageAddress, privateTab: tab.shy, frameHost: tab.fieldFrameHost,
+                           passwords: passwords, kept: known.count),
+                .init(appleOn: prefs.applePasswords, fills: prefs.fillsPasswords,
+                      helper: ApplePasswordsOffer.benchHelper ?? ApplePasswordsOffer.helperHere,
+                      testRun: Store.testing, benchAsks: ApplePasswordsOffer.benchAsks))
+        }()
         appleAsk += 1
         // Asked only for the tab in front of you, in the window you are in.
         if let appleHost, apple.state == .paired, tab.built?.window?.isKeyWindow == true {
-            lookUpApple(appleHost, in: tab, host: host, name: name)
+            lookUpApple(appleHost, in: tab, host: host, name: name, wide: wide)
         }
-        guard !known.isEmpty || !passkeys.isEmpty || connect else {
+        guard !known.isEmpty || !passkeys.isEmpty || connect || offer != nil else {
             suggesting = nil
             return
         }
         // What is under the pointer changed: the half second starts again.
         if let up = suggesting, up.tab == tab.id, up.logins == known, up.passkeys == passkeys, up.nameOnly == name,
-           up.appleConnect == connect, up.apple.isEmpty {
+           up.appleConnect == connect, up.apple.isEmpty, up.wide == wide, up.appleOffer == offer {
             suggesting?.spot = spot
             return
         }
         suggesting = Suggesting(tab: tab.id, spot: spot, logins: known, passkeys: passkeys, host: host, clear: inTheClear,
-                                nameOnly: name, appleHost: appleHost, appleConnect: connect)
+                                nameOnly: name, appleHost: appleHost, appleConnect: connect, appleOffer: offer, wide: wide)
+        if let offer { applePasswordsOffer.shown(on: offer) }
     }
 
     /// Asks Apple's helper for the names it keeps for the page, and adds
     /// them under the box if the caret is still in it, on the same page.
-    private func lookUpApple(_ appleHost: String, in tab: Tab, host: String, name: Bool) {
+    private func lookUpApple(_ appleHost: String, in tab: Tab, host: String, name: Bool, wide: Bool) {
         let ask = appleAsk
         Task { [weak self] in
             // A page that moves the caret from box to box queues no backlog:
@@ -851,7 +892,7 @@ final class Browser: NSObject, ObservableObject {
             else { return }
             let mine = suggesting?.tab == tab.id ? suggesting?.logins ?? [] : []
             let apple = Array(found
-                .filter { ApplePasswords.belongs($0.sites, to: appleHost) }
+                .filter { ApplePasswords.belongs($0.sites, to: appleHost, wide: wide) }
                 .filter { theirs in !mine.contains { $0.user.caseInsensitiveCompare(theirs.user) == .orderedSame } }
                 .prefix(5))
             guard !apple.isEmpty else { return }
@@ -920,6 +961,43 @@ final class Browser: NSObject, ObservableObject {
         guard let list = suggesting, Date().timeIntervalSince(list.shown) > 0.5 else { return }
         suggesting = nil
         beginApplePairing(on: list.tab, at: list.spot)
+    }
+
+    /// "Use your Apple passwords?" clicked: the switch turned on, as in
+    /// Settings › Passwords, and the pairing card where the list was. Once
+    /// paired, the caret goes back to the box and the accounts come up.
+    func useApplePasswords() {
+        lowering?.cancel()
+        guard let list = suggesting, list.appleOffer != nil, Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        offerAnswered = true
+        suggesting = nil
+        prefs.applePasswords = true
+        beginApplePairing(on: list.tab, at: list.spot)
+    }
+
+    /// The offer's ✕: "don't offer again", anywhere. The rest of the list
+    /// stays.
+    func neverOfferApplePasswords() {
+        lowering?.cancel()
+        guard var list = suggesting, list.appleOffer != nil, Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        applePasswordsOffer.dismissed()
+        offerAnswered = true
+        list.appleOffer = nil
+        let empty = list.logins.isEmpty && list.passkeys.isEmpty && list.apple.isEmpty && !list.appleConnect
+        suggesting = empty ? nil : list
+    }
+
+    /// For a test run only: the offer under a box of `tab`, as `hang` puts
+    /// it up, `age` seconds ago; or (nil) the list taken down as the caret
+    /// leaving takes it.
+    func testOffer(on tab: Tab.ID?, site: String = "example.com", age: TimeInterval = 1) {
+        guard Store.testing else { return }
+        guard let tab else { suggesting = nil; return }
+        var list = Suggesting(tab: tab, spot: CGRect(x: 40, y: 120, width: 280, height: 30), logins: [], host: site,
+                              clear: false, appleOffer: site)
+        list.shown = Date().addingTimeInterval(-age)
+        suggesting = list
+        applePasswordsOffer.shown(on: site)
     }
 
     /// Pairing with Apple Passwords from under a sign-in box: the card that
@@ -1711,7 +1789,9 @@ final class Browser: NSObject, ObservableObject {
     private var tabOriginal = ""
 
     func beginTabEdit(_ tab: Tab) {
-        guard let url = tab.shownURL else {
+        // The column of icons has no row to type in: the field over the
+        // page, with the address in it, as ⌘L brings it.
+        guard let url = tab.shownURL, !prefs.iconColumn else {
             edit()
             return
         }
@@ -3014,13 +3094,14 @@ final class Browser: NSObject, ObservableObject {
     }
 
     /// Whether a tab goes into the session: not a private one or the
-    /// bench's, and only with a web address. A sleeping view is blank, so
-    /// `pending` must win or its page will disappear from the next session.
+    /// bench's, and only a web page, local file or one of Search's own pages.
+    /// A sleeping view is blank, so `pending` must win or its page disappears.
     private func kept(_ tab: Tab) -> Bool {
         // A tab holding an extension's sign-in answer (Tab.hold) carries its
         // code in the address: that is never written down.
-        !tab.shy && !tab.bench && tab.held == nil
-            && ((tab.pending ?? tab.address)?.scheme?.hasPrefix("http") == true || tab.page != nil)
+        let url = tab.pending ?? tab.address
+        return !tab.shy && !tab.bench && tab.held == nil
+            && (url?.scheme?.hasPrefix("http") == true || url?.isFileURL == true || tab.page != nil)
     }
 
     /// Another space's row. Its groups are the ones in its own file, the
@@ -3341,14 +3422,17 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘T, the + button and the menu. With the floating field turned on and
     /// a page in front, the field comes up over that page instead of a blank
     /// tab: the tab is made by Return, not by asking for one. Anywhere else
-    /// — a blank tab already in front, or an extension's new tab page you
-    /// chose — it is an ordinary new tab.
+    /// — a blank tab already in front, an extension's new tab page you
+    /// chose, or one still to be asked about, whose page needs the tab to
+    /// show in — it is an ordinary new tab. From a private tab the field
+    /// still comes up for one to be asked about: a private new tab never
+    /// asks.
     func launch() {
         guard prefs.floatingNewTab, let tab = active, !tab.isBlank, peekTab == nil else {
             newTab()
             return
         }
-        if #available(macOS 15.4, *), Extensions.shared.newTabPage != nil {
+        if #available(macOS 15.4, *), Extensions.shared.newTabPage != nil || (!tab.shy && Extensions.shared.newTabUnaskedAsker != nil) {
             newTab()
             return
         }
@@ -3564,10 +3648,28 @@ final class Browser: NSObject, ObservableObject {
         // takes you into a pin you had not asked for, and wakes it if it was
         // asleep. The pins stay where they are; a new tab takes this one's
         // place. Off, the neighbour is picked as before (#537).
-        if prefs.newTabAfterLast, activeID == tab.id,
-           !tabs.contains(where: { $0.id != tab.id && $0.pin == nil }) {
+        //
+        // Tabs in groups are kept as pins are, as Arc keeps its folders: the
+        // last loose tab closed beside them leaves a new tab too, switch or
+        // no switch. Its neighbour was a page out of a folder, the folder
+        // opened for it, and ⌘T then floated its field over that page
+        // rather than giving a new tab. An empty tab closed
+        // there stays: it is already the new tab closing it would leave, and
+        // the window, holding the groups, stays open.
+        let kept: (Tab) -> Bool = { $0.pin != nil || self.group(of: $0) != nil }
+        let besideGroups = tabs.contains { $0.id != tab.id && $0.pin == nil && self.group(of: $0) != nil }
+        let onlyPins = prefs.newTabAfterLast && !tabs.contains { $0.id != tab.id && $0.pin == nil }
+        let onlyKept = besideGroups && !kept(tab) && !tabs.contains { $0.id != tab.id && !kept($0) }
+        if activeID == tab.id, onlyPins || onlyKept {
             if tab.isBlank {
-                NSApp.keyWindow?.performClose(nil)
+                if besideGroups {
+                    typed = ""
+                    tab.draft = ""
+                    editing = false
+                    focusRequest += 1
+                } else {
+                    NSApp.keyWindow?.performClose(nil)
+                }
                 return
             }
             let fresh = Tab(configuration: Web.configuration(space: spaceID))
@@ -4067,6 +4169,22 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
+    /// Fold All Groups / Unfold All Groups, in the space's menu and the View
+    /// menu, as in Arc: every group of the space on screen at once, each
+    /// keeping its tabs and its place. A folded group still shows the tab in
+    /// front if that is one of its own, as one folded by hand does.
+    func foldAllGroups(_ fold: Bool) {
+        guard tabGroups.contains(where: { $0.collapsed != fold }) else { return }
+        for index in tabGroups.indices where tabGroups[index].collapsed != fold {
+            tabGroups[index].collapsed = fold
+        }
+        writeSession(now: true)
+    }
+
+    /// Whether Fold All Groups or Unfold All Groups has anything to do.
+    var canFoldAllGroups: Bool { prefs.usesTabGroups && tabGroups.contains { !$0.collapsed } }
+    var canUnfoldAllGroups: Bool { prefs.usesTabGroups && tabGroups.contains { $0.collapsed } }
+
     func removeTabGroup(_ id: UUID) {
         guard tabGroups.contains(where: { $0.id == id }) else { return }
         for tab in tabs where tab.groupID == id { tab.groupID = nil }
@@ -4521,6 +4639,15 @@ final class Browser: NSObject, ObservableObject {
         fresh.popup = tab.popup
         fresh.pin = tab.pin
         fresh.listed = tab.listed
+        // And it stays the same pin. With no id of its own it would be given
+        // a new one, and every other window would close its tab for the old
+        // pin and make a sleeping one for the new, losing the page it had
+        // there; with no home, the page it was pinned at would become
+        // wherever this swap went; and a pin every space shows would be
+        // written back as this space's own (see writeSession).
+        fresh.pinID = tab.pinID
+        fresh.home = tab.home
+        fresh.everywhere = tab.everywhere
         fresh.name = tab.name
         prepare(fresh)
         fresh.groupID = tab.groupID
@@ -5196,8 +5323,8 @@ final class Browser: NSObject, ObservableObject {
         // The caret in a sign-in box: the accounts kept for this site hang
         // from the box, and go when the caret does. Nothing is filled on
         // its own — the way Safari does it, and what a person expects.
-        tab.onField = { [weak self] tab, spot, passwords, name in
-            self?.hang(from: tab, spot, passwords: passwords, name: name)
+        tab.onField = { [weak self] tab, spot, passwords, name, wide in
+            self?.hang(from: tab, spot, passwords: passwords, name: name, wide: wide)
         }
 
         tab.onCredentials = { [weak self] tab, host, user, password, clear in
@@ -5785,6 +5912,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
                 let shy = self?.tab(for: webView)?.shy == true || !webView.configuration.websiteDataStore.isPersistent
                 Autoplay.apply(to: preferences, for: url, shy: shy,
                                made: webView.configuration.mediaTypesRequiringUserActionForPlayback)
+                PrivacySignal.apply(to: preferences, shy: shy)
             }
             decisionHandler(policy, preferences)
         }
@@ -7004,7 +7132,7 @@ extension Browser {
     func show(_ page: InternalPage) -> Tab {
         // A pop-up window holds its one page: Search's own open beside it.
         if websitePopup { return tabDestination.show(page) }
-        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page(rawValue: detail) {
+        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page.named( detail) {
             settingsPage = section
         }
         if page.kind == .passwords { relist() }
@@ -7047,9 +7175,11 @@ extension Browser {
             show(page)
             return
         }
-        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page(rawValue: detail) {
+        if page.kind == .settings, let detail = page.detail, let section = SettingsPanel.Page.named( detail) {
             settingsPage = section
         }
+        // As show(_:) does: the list read before the page is drawn.
+        if page.kind == .passwords { relist() }
         here.show(page)
         writeSessionSoon()
     }
