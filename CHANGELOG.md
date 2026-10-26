@@ -14,6 +14,15 @@ in [ROADMAP.md](ROADMAP.md).
 ### Added
 
 - Optional domain-to-Space routing, scoped to each window’s profile, in Settings › Routing. Starts disabled with no rules; external links use the destination’s session from the first request. Internal links stay current unless Ask or routing is selected (#721).
+- Close Tabs Below in a tab's right-click menu, beside Close Other Tabs (Close Tabs to the Right with tabs across the top). Keeps the clicked tab, the tabs above it and pinned tabs; folded groups below are closed too. Closed as one entry in Recently Closed, so one ⇧⌘T brings them all back, with their groups and Split View pairs. Thanks [@BeNDYGo](https://github.com/BeNDYGo) ([#710](https://github.com/driceroland/Search/pull/710)), asked for on [#704](https://github.com/driceroland/Search/issues/704)
+- With Icons only, the tab you're on shows a close button in place of its icon while the pointer is over it. A click closes that tab; another tab still selects first. In Split View, the cross closes only the focused page. Thanks [@BeNDYGo](https://github.com/BeNDYGo) ([#720](https://github.com/driceroland/Search/pull/720))
+- Coding agents can drive Search through `./bench-mcp`, an MCP server over the bench: each session gets a hidden test world of its own, wiped when it closes; pages are read as roles and names, clicks are real ones, typing is checked against the field, and a stale handle or a covered button is an error rather than a guess. Its tool contract follows ArcMod's agent browser tools ([CryogenicPlanet/arc](https://github.com/CryogenicPlanet/arc)). `python3 Tests/bench_mcp.py` checks it. Thanks [@oddharsh](https://github.com/oddharsh) ([#715](https://github.com/driceroland/Search/pull/715))
+
+### Fixed
+
+- GPTZero can start again: WebKit sent its worker an empty cookie-change notification, and left Chrome's install-reason constants out of content scripts. Both stopped parts of the extension as they began, including its copy tracker, LMS bridge and recorder. Thanks [@mastercoder26](https://github.com/mastercoder26) for reporting ([#724](https://github.com/driceroland/Search/issues/724))
+- The address field's page cover fades without scaling, so its edges stay over the page while the field opens and closes. The field keeps its small zoom and the same animation timing, with Split View on or off. Thanks [@mocki-toki](https://github.com/mocki-toki) ([#718](https://github.com/driceroland/Search/pull/718))
+- Settings scrolls with the pointer anywhere over its page, the empty margins beside the rows included; it scrolled only over the column of rows. Thanks [@mocki-toki](https://github.com/mocki-toki) ([#719](https://github.com/driceroland/Search/pull/719))
 
 ### Held back
 
