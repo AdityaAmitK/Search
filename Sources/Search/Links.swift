@@ -329,11 +329,12 @@ final class Links: NSObject, NSApplicationDelegate {
     /// every time. Open in Search is what brings it now.
     @MainActor
     private static func little(_ url: URL) -> Bool {
-        if !launched { Browsers.keepAway() }
+        guard Shared.prefs.littleLinks else { return false }
         // The space and sign-ins of the window in front, on screen or not.
         let browser = Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
             ?? Browsers.primary ?? SceneSlot.shared.browser
-        guard Routing.shared.config.match(url, profileID: browser.profileID) == nil, Shared.prefs.littleLinks else { return false }
+        guard Routing.shared.config.match(url, profileID: browser.profileID) == nil else { return false }
+        if !launched { Browsers.keepAway() }
         LittleWindow.show(url, for: browser)
         return true
     }
