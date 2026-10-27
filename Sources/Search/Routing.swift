@@ -22,7 +22,7 @@ struct RoutingRule: Codable, Identifiable, Equatable {
     var id = UUID()
     var domain: String
     var port: Int?
-    /// The profile whose links this rule applies to.
+    /// Legacy source profile, retained only to recover the original destination.
     var profileID: UUID?
     var destinationProfileID: UUID?
     var destinationProfile: UUID { destinationProfileID ?? profileID ?? Profile.personalID }
@@ -70,7 +70,17 @@ struct RoutingConfig: Codable, Equatable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         rules = try values.decodeIfPresent([RoutingRule].self, forKey: .rules) ?? []
+        // Preserve account destinations when migrating profile-local rules.
+        for index in rules.indices {
+            rules[index].destinationProfileID = rules[index].destinationProfile
+            rules[index].profileID = nil
+        }
         internalPolicy = try values.decodeIfPresent(InternalRoutingPolicy.self, forKey: .internalPolicy) ?? .current
+        // Keep every conflicting rule for the user to resolve; never pick an account.
+        if hasDuplicateRules { enabled = false }
+    }
+    var hasDuplicateRules: Bool {
+        Dictionary(grouping: rules, by: \.hostLabel).values.contains { $0.count > 1 }
     }
     func policy(for rule: RoutingRule) -> InternalRoutingPolicy {
         InternalRoutingPolicy(rawValue: rule.internalPolicy.rawValue) ?? internalPolicy
@@ -99,12 +109,13 @@ struct RoutingConfig: Codable, Equatable {
         return value
     }
 
-    func match(_ url: URL, profileID: UUID = Profile.personalID) -> RoutingRule? {
-        guard enabled, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+    // The legacy profile argument is ignored: the rule list applies everywhere.
+    func match(_ url: URL, profileID _: UUID = Profile.personalID) -> RoutingRule? {
+        guard enabled, !hasDuplicateRules, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               let host = url.host.flatMap(Self.domain) else { return nil }
         let port = url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80)
         return rules.filter { rule in
-            (rule.profileID ?? Profile.personalID) == profileID && rule.enabled && Self.domain(rule.domain) == rule.domain &&
+            rule.enabled && Self.domain(rule.domain) == rule.domain &&
                 (rule.port.map { (1...65535).contains($0) } ?? true) &&
                 (rule.port == nil || rule.port == port) &&
                 (host == rule.domain || (!Self.isLocalHost(rule.domain) && host.hasSuffix("." + rule.domain)))
@@ -132,11 +143,12 @@ final class Routing: ObservableObject {
             let defaults = [("Personal", ["x.com", "twitter.com", "t.co", "youtube.com", "youtu.be"]),
                             ("Work", ["sentry.io", "slack.com", "linear.app", "github.com"])]
             config = RoutingConfig(rules: defaults.flatMap { name, domains in
-                let id = spaces.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id ?? UUID()
-                return domains.map { RoutingRule(domain: $0, spaceID: id, spaceName: name) }
+                let space = spaces.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+                let id = space?.id ?? UUID()
+                return domains.map { RoutingRule(domain: $0, spaceID: id, spaceName: name, destinationProfileID: space?.profileID) }
             })
-            persist()
         }
+        persist()
     }
 
     private func persist() {
@@ -144,7 +156,11 @@ final class Routing: ObservableObject {
     }
 
     func setInternalPolicy(_ policy: InternalRoutingPolicy) { config.internalPolicy = policy; persist() }
-    func setEnabled(_ enabled: Bool) { config.enabled = enabled; persist() }
+    func setEnabled(_ enabled: Bool) {
+        guard !enabled || !config.hasDuplicateRules else { return }
+        config.enabled = enabled
+        persist()
+    }
     func setRuleEnabled(_ id: UUID, _ enabled: Bool) {
         guard let index = config.rules.firstIndex(where: { $0.id == id }) else { return }
         config.rules[index].enabled = enabled
@@ -152,22 +168,21 @@ final class Routing: ObservableObject {
     }
     func remove(_ id: UUID) { config.rules.removeAll { $0.id == id }; persist() }
     @discardableResult
-    func save(id: UUID?, domain input: String, port: Int? = nil, space: Space, sourceProfileID: UUID, internalPolicy: InternalRoutingOverride = .inherit) -> Bool {
-        guard Profiles.shared.list.contains(where: { $0.id == sourceProfileID }),
-              Profiles.shared.list.contains(where: { $0.id == space.profileID }),
+    func save(id: UUID?, domain input: String, port: Int? = nil, space: Space, internalPolicy: InternalRoutingOverride = .inherit) -> Bool {
+        guard Profiles.shared.list.contains(where: { $0.id == space.profileID }),
               Spaces.read(profile: space.profileID).contains(where: { $0.id == space.id }),
               let domain = RoutingConfig.domain(input), port.map({ (1...65535).contains($0) }) ?? true,
-              !config.rules.contains(where: { $0.domain == domain && $0.port == port && ($0.profileID ?? Profile.personalID) == sourceProfileID && $0.id != id }) else { return false }
+              !config.rules.contains(where: { $0.domain == domain && $0.port == port && $0.id != id }) else { return false }
         if let id, let index = config.rules.firstIndex(where: { $0.id == id }) {
             config.rules[index].domain = domain
             config.rules[index].port = port
-            config.rules[index].profileID = sourceProfileID
+            config.rules[index].profileID = nil
             config.rules[index].destinationProfileID = space.profileID
             config.rules[index].spaceID = space.id
             config.rules[index].spaceName = space.name
             config.rules[index].internalPolicy = internalPolicy
         } else {
-            config.rules.append(RoutingRule(domain: domain, port: port, spaceID: space.id, spaceName: space.name, internalPolicy: internalPolicy, profileID: sourceProfileID, destinationProfileID: space.profileID))
+            config.rules.append(RoutingRule(domain: domain, port: port, spaceID: space.id, spaceName: space.name, internalPolicy: internalPolicy, destinationProfileID: space.profileID))
         }
         persist()
         return true
@@ -205,6 +220,11 @@ struct RoutingPage: View {
         VStack(alignment: .leading, spacing: 16) {
             Toggle("Enable link routing", isOn: Binding(
                 get: { routing.config.enabled }, set: { routing.setEnabled($0) }))
+                .disabled(routing.config.hasDuplicateRules)
+            if routing.config.hasDuplicateRules {
+                Text("Routing is paused. Some saved rules use the same domain and port. Remove the extra rules or edit their domains and ports before enabling routing.")
+                    .font(.system(size: 12)).foregroundStyle(.orange)
+            }
             Text("Domains include their subdomains; localhost and loopback hosts match exactly. Blank ports match all ports. The most specific enabled rule wins. External links always use the rule destination.")
                 .font(.system(size: 12)).foregroundStyle(Palette.muted)
             Picker("Links opened inside Search", selection: Binding(
@@ -215,11 +235,11 @@ struct RoutingPage: View {
                 Text("With Spaces off, routing can open only a profile’s home Space.")
                     .font(.system(size: 12)).foregroundStyle(.orange)
             }
-            Text("Rules apply from \(Profiles.shared.profile(browser.profileID).name). Destinations can be in any profile.")
+            Text("Shared by all profiles. Changes here apply everywhere. Each rule chooses one destination profile and Space.")
                 .font(.system(size: 12)).foregroundStyle(Palette.muted)
             Button("Add rule") { draft = RoutingDraft() }
             Divider()
-            ForEach(routing.config.rules.filter { ($0.profileID ?? Profile.personalID) == browser.profileID }) { rule in
+            ForEach(routing.config.rules) { rule in
                 HStack(spacing: 10) {
                     Toggle("Enable \(rule.hostLabel)", isOn: Binding(
                         get: { routing.config.rules.first { $0.id == rule.id }?.enabled ?? false },
@@ -242,7 +262,7 @@ struct RoutingPage: View {
                     }.help("Remove \(rule.hostLabel)").accessibilityLabel("Remove \(rule.hostLabel)")
                 }
             }
-            if !routing.config.rules.contains(where: { ($0.profileID ?? Profile.personalID) == browser.profileID }) {
+            if routing.config.rules.isEmpty {
                 Text("No routing rules. External links open in the current space.")
                     .font(.system(size: 12)).foregroundStyle(Palette.muted)
             }
@@ -293,7 +313,7 @@ private struct RoutingEditor: View {
     private var selectedSpace: Space? { destinationSpaces.first { $0.id == destination } }
     private var valid: Bool {
         guard let normalized = RoutingConfig.domain(domain), selectedSpace != nil, port.isEmpty || RoutingConfig.port(port) != nil else { return false }
-        return !routing.config.rules.contains { $0.domain == normalized && $0.port == RoutingConfig.port(port) && ($0.profileID ?? Profile.personalID) == browser.profileID && $0.id != editing }
+        return !routing.config.rules.contains { $0.domain == normalized && $0.port == RoutingConfig.port(port) && $0.id != editing }
     }
 
     var body: some View {
@@ -328,7 +348,7 @@ private struct RoutingEditor: View {
             }
             HStack {
                 Button(editing == nil ? "Add rule" : "Save rule") {
-                    if let space = selectedSpace, routing.save(id: editing, domain: domain, port: RoutingConfig.port(port), space: space, sourceProfileID: browser.profileID, internalPolicy: internalPolicy) { dismiss() }
+                    if let space = selectedSpace, routing.save(id: editing, domain: domain, port: RoutingConfig.port(port), space: space, internalPolicy: internalPolicy) { dismiss() }
                 }.disabled(!valid)
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -345,7 +365,7 @@ extension Browser {
     func routeInternal(_ url: URL, from source: Tab?, foreground: Bool,
                        current: @escaping () -> Void) -> Bool {
         guard source?.shy != true,
-              let rule = Routing.shared.config.match(url, profileID: profileID) else { return false }
+              let rule = Routing.shared.config.match(url) else { return false }
         let policy = Routing.shared.config.policy(for: rule)
         guard policy != .current else { return false }
         let originalSpace = spaceID

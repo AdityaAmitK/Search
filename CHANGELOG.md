@@ -11,6 +11,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ## Unreleased
 
+### Shared routing
+
+- Routing is one shared section and rule list for every profile, with globally unique domain/port rules and explicit Profile → Space destinations. Existing destinations are preserved; duplicate saved rules pause routing until resolved.
+
 ### Routing update
 
 - Routing is visible in the Settings sidebar. Rules can explicitly target a profile and one of its Spaces; links use that destination’s session, while the source tab stays in its original window. Existing rules retain their destinations.

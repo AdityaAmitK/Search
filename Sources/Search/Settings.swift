@@ -79,9 +79,10 @@ struct SettingsPanel: View {
             default: return Page(rawValue: name.lowercased())
             }
         }
-        /// The rail's three blocks: the browser, your data and tools, About.
+        /// The rail's blocks: the browser, shared routing, your data and tools, About.
         static var blocks: [[Page]] {
-            [[.general, .appearance, .tabs, .browsing, .spaces, .routing],
+            [[.general, .appearance, .tabs, .browsing, .spaces],
+             [.routing],
              [.passwords, .privacy] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
              [.about]]
         }

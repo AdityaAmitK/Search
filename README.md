@@ -6,7 +6,7 @@ Routing lives directly in this fork's Swift source on the `main` branch. There i
 
 ## Routing
 
-Open Search → Settings (⌘,) → Routing. Rules apply from the profile whose window you are editing. Each rule chooses a destination Profile, then one of that profile’s Spaces. A cross-profile route opens in that profile’s window; it does not move the source tab or share its session. With Spaces disabled, only a profile’s home Space can be targeted. Existing rules retain their original profile and Space.
+Open Search → Settings (⌘,) → Routing. Routing is a shared section: every profile sees and edits the same rule list, and each domain/port rule applies from every profile. Each rule chooses a destination Profile, then one of that profile’s Spaces. A cross-profile route opens in that profile’s window; it does not move the source tab or share its session. With Spaces disabled, only a profile’s home Space can be targeted. Existing rules retain their destination profile and Space. If old per-profile rules duplicate a domain/port, routing pauses until those duplicates are resolved.
 
 Enable Spaces, then configure routing in Settings. Rules match a host and its subdomains; a more specific host wins. For example, route `github.com` to Work and `gist.github.com` to Research. Host matching ignores case and a trailing dot, and never matches an unrelated host containing the same text. Destination Spaces are stored by identity, so renaming a Space preserves its rules.
 
