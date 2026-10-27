@@ -220,16 +220,10 @@ final class Links: NSObject, NSApplicationDelegate {
 
     /// Only addresses handed over by another application use this policy.
     @MainActor
-    private static func prepareExternal(_ url: URL, in browser: Browser) -> Bool {
-        guard let rule = Routing.shared.config.match(url, profileID: browser.profileID) else { return true }
-        guard browser.prefs.usesSpaces,
-              let destination = browser.spaces.first(where: { $0.id == rule.spaceID }) else {
-            browser.announce("Link not opened: enable Spaces and choose a destination in Settings → Routing")
-            return false
-        }
-        // Switch before arrive/open constructs the tab's WebKit data store.
-        browser.switchSpace(to: destination.id)
-        return browser.spaceID == destination.id
+    private static func prepareExternal(_ url: URL, in browser: Browser, foreground: Bool = true) -> Browser? {
+        guard let rule = Routing.shared.config.match(url, profileID: browser.profileID) else { return browser }
+        // Resolve the profile and Space before arrive/open creates the URL's tab.
+        return Routing.browser(for: rule.spaceID, profileID: rule.destinationProfile, from: browser, foreground: foreground)
     }
 
     /// The browser, once it has a window. Anything that came earlier is
@@ -249,24 +243,24 @@ final class Links: NSObject, NSApplicationDelegate {
             // The window in front's browser, or a window brought back for it:
             // the link lands where you are, not in the first window.
             let browser = Browsers.ensureWindow()
-            guard prepareExternal(url, in: browser) else { return }
-            browser.arrive(url)
+            guard let target = prepareExternal(url, in: browser) else { return }
+            target.arrive(url)
             // Put away in the Dock, it stayed there: bringing a window to the
             // front doesn't take it out (#95).
-            if let window = browser.window, window.isMiniaturized { window.deminiaturize(nil) }
-            browser.window?.makeKeyAndOrderFront(nil)
+            if let window = target.window, window.isMiniaturized { window.deminiaturize(nil) }
+            target.window?.makeKeyAndOrderFront(nil)
             comeForward()
         }
         let early = waiting
         waiting = []
         guard let first = early.first else { return }
         onceShown { [weak browser] in
-            if let browser, prepareExternal(first, in: browser) { browser.arrive(first) }
+            if let browser, let target = prepareExternal(first, in: browser) { target.arrive(first) }
             comeForward()
             for (n, url) in early.dropFirst().enumerated() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 * Double(n + 1)) { [weak browser] in
-                    guard let browser, prepareExternal(url, in: browser) else { return }
-                    browser.open(url, foreground: false, atEnd: true, mayWait: true)
+                    guard let browser, let target = prepareExternal(url, in: browser, foreground: false) else { return }
+                    target.open(url, foreground: false, atEnd: true, mayWait: true)
                 }
             }
         }

@@ -177,16 +177,16 @@ extension Browsers {
     /// one at the space it was last in, its tabs read back from the
     /// profile's own files when no window of it is open.
     @discardableResult
-    static func open(profile id: UUID) -> Browser {
+    static func open(profile id: UUID, foreground: Bool = true) -> Browser {
         if let open = all.last(where: { $0.profileID == id && $0.isOpen && !$0.isPopup }) {
-            show(open)
+            if foreground { show(open) }
             return open
         }
         let space = Store.settings.string(forKey: "space.current.\(id.uuidString)").flatMap(UUID.init)
             .flatMap { last in Spaces.read(profile: id).first { $0.id == last }?.id }
             ?? Profiles.shared.profile(id).home
         let browser = Browser(record: WindowRecord(space: space))
-        open(browser, frame: nil)
+        open(browser, frame: nil, foreground: foreground)
         return browser
     }
 }

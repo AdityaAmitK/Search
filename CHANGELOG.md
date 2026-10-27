@@ -11,6 +11,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ## Unreleased
 
+### Routing update
+
+- Routing is visible in the Settings sidebar. Rules can explicitly target a profile and one of its Spaces; links use that destination’s session, while the source tab stays in its original window. Existing rules retain their destinations.
+
 ### Added
 
 - Optional domain-to-Space routing, scoped to each window’s profile, in Settings › Routing. Starts disabled with no rules; external links use the destination’s session from the first request. Internal links stay current unless Ask or routing is selected (#721).

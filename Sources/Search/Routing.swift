@@ -22,18 +22,22 @@ struct RoutingRule: Codable, Identifiable, Equatable {
     var id = UUID()
     var domain: String
     var port: Int?
+    /// The profile whose links this rule applies to.
     var profileID: UUID?
+    var destinationProfileID: UUID?
+    var destinationProfile: UUID { destinationProfileID ?? profileID ?? Profile.personalID }
     var spaceID: UUID
     var spaceName: String
     var enabled = true
     var internalPolicy: InternalRoutingOverride = .inherit
 
-    enum CodingKeys: String, CodingKey { case id, domain, port, profileID, spaceID, spaceName, enabled, internalPolicy }
+    enum CodingKeys: String, CodingKey { case id, domain, port, profileID, destinationProfileID, spaceID, spaceName, enabled, internalPolicy }
     init(id: UUID = UUID(), domain: String, port: Int? = nil, spaceID: UUID, spaceName: String,
-         enabled: Bool = true, internalPolicy: InternalRoutingOverride = .inherit, profileID: UUID? = nil) {
+         enabled: Bool = true, internalPolicy: InternalRoutingOverride = .inherit, profileID: UUID? = nil, destinationProfileID: UUID? = nil) {
         self.id = id; self.domain = domain; self.port = port; self.spaceID = spaceID; self.spaceName = spaceName
         self.enabled = enabled; self.internalPolicy = internalPolicy
         self.profileID = profileID
+        self.destinationProfileID = destinationProfileID
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -41,6 +45,7 @@ struct RoutingRule: Codable, Identifiable, Equatable {
         domain = try values.decode(String.self, forKey: .domain)
         port = try values.decodeIfPresent(Int.self, forKey: .port)
         profileID = try values.decodeIfPresent(UUID.self, forKey: .profileID)
+        destinationProfileID = try values.decodeIfPresent(UUID.self, forKey: .destinationProfileID)
         spaceID = try values.decode(UUID.self, forKey: .spaceID)
         spaceName = try values.decode(String.self, forKey: .spaceName)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
@@ -141,22 +146,48 @@ final class Routing: ObservableObject {
     }
     func remove(_ id: UUID) { config.rules.removeAll { $0.id == id }; persist() }
     @discardableResult
-    func save(id: UUID?, domain input: String, port: Int? = nil, space: Space, internalPolicy: InternalRoutingOverride = .inherit) -> Bool {
-        guard let domain = RoutingConfig.domain(input), port.map({ (1...65535).contains($0) }) ?? true,
-              !config.rules.contains(where: { $0.domain == domain && $0.port == port && ($0.profileID ?? Profile.personalID) == Spaces.profile(of: space.id) && $0.id != id }) else { return false }
+    func save(id: UUID?, domain input: String, port: Int? = nil, space: Space, sourceProfileID: UUID, internalPolicy: InternalRoutingOverride = .inherit) -> Bool {
+        guard Profiles.shared.list.contains(where: { $0.id == sourceProfileID }),
+              Profiles.shared.list.contains(where: { $0.id == space.profileID }),
+              Spaces.read(profile: space.profileID).contains(where: { $0.id == space.id }),
+              let domain = RoutingConfig.domain(input), port.map({ (1...65535).contains($0) }) ?? true,
+              !config.rules.contains(where: { $0.domain == domain && $0.port == port && ($0.profileID ?? Profile.personalID) == sourceProfileID && $0.id != id }) else { return false }
         if let id, let index = config.rules.firstIndex(where: { $0.id == id }) {
             config.rules[index].domain = domain
             config.rules[index].port = port
-            config.rules[index].profileID = Spaces.profile(of: space.id)
+            config.rules[index].profileID = sourceProfileID
+            config.rules[index].destinationProfileID = space.profileID
             config.rules[index].spaceID = space.id
             config.rules[index].spaceName = space.name
             config.rules[index].internalPolicy = internalPolicy
         } else {
-            config.rules.append(RoutingRule(domain: domain, port: port, spaceID: space.id, spaceName: space.name, internalPolicy: internalPolicy, profileID: Spaces.profile(of: space.id)))
+            config.rules.append(RoutingRule(domain: domain, port: port, spaceID: space.id, spaceName: space.name, internalPolicy: internalPolicy, profileID: sourceProfileID, destinationProfileID: space.profileID))
         }
         persist()
         return true
     }
+
+    static func browser(for spaceID: UUID, profileID: UUID, from source: Browser,
+                        foreground: Bool) -> Browser? {
+        guard let profile = Profiles.shared.list.first(where: { $0.id == profileID }),
+              Spaces.read(profile: profileID).contains(where: { $0.id == spaceID }) else {
+            source.announce("Link not opened: choose an existing profile and Space in Settings → Routing")
+            return nil
+        }
+        guard source.prefs.usesSpaces || spaceID == profile.home else {
+            source.announce("Link not opened: enable Spaces in Settings → Spaces & Pins")
+            return nil
+        }
+        let target = profileID == source.profileID ? source : Browsers.open(profile: profileID, foreground: foreground)
+        if target.spaceID != spaceID { target.switchSpace(to: spaceID) }
+        guard target.profileID == profileID, target.spaceID == spaceID else {
+            source.announce("Link not opened: the destination is no longer available")
+            return nil
+        }
+        if foreground, let window = target.window, window.isMiniaturized { window.deminiaturize(nil) }
+        return target
+    }
+
 }
 
 struct RoutingPage: View {
@@ -175,10 +206,10 @@ struct RoutingPage: View {
                 ForEach(InternalRoutingPolicy.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             if !browser.prefs.usesSpaces {
-                Text("Enable Spaces in Spaces & Pins to open routed links. Until then, matching links are blocked.")
+                Text("With Spaces off, routing can open only a profile’s home Space.")
                     .font(.system(size: 12)).foregroundStyle(.orange)
             }
-            Text("Rules for this window’s profile. Other profiles keep their own destinations.")
+            Text("Rules apply from \(Profiles.shared.profile(browser.profileID).name). Destinations can be in any profile.")
                 .font(.system(size: 12)).foregroundStyle(Palette.muted)
             Button("Add rule") { draft = RoutingDraft() }
             Divider()
@@ -190,14 +221,15 @@ struct RoutingPage: View {
                         .labelsHidden().accessibilityLabel("Enable \(rule.hostLabel)")
                     VStack(alignment: .leading, spacing: 3) {
                         Text(rule.hostLabel).font(.system(size: 13, weight: .medium))
-                        if let space = browser.spaces.first(where: { $0.id == rule.spaceID }) {
-                            Text(space.name).font(.system(size: 12)).foregroundStyle(Palette.muted)
+                        if let profile = Profiles.shared.list.first(where: { $0.id == rule.destinationProfile }),
+                           let space = Spaces.read(profile: profile.id).first(where: { $0.id == rule.spaceID }) {
+                            Text("\(profile.name) → \(space.name)").font(.system(size: 12)).foregroundStyle(Palette.muted)
                         } else {
                             Text("Missing space: \(rule.spaceName)").font(.system(size: 12)).foregroundStyle(.orange)
                         }
                     }
                     Spacer()
-                    Button("Edit") { draft = RoutingDraft(ruleID: rule.id, domain: rule.domain, port: rule.port.map(String.init) ?? "", destination: rule.spaceID, internalPolicy: rule.internalPolicy) }
+                    Button("Edit") { draft = RoutingDraft(ruleID: rule.id, domain: rule.domain, port: rule.port.map(String.init) ?? "", destination: rule.spaceID, destinationProfile: rule.destinationProfile, internalPolicy: rule.internalPolicy) }
                         .accessibilityLabel("Edit \(rule.hostLabel)")
                     Button { routing.remove(rule.id) } label: {
                         Image(systemName: "trash")
@@ -222,6 +254,7 @@ private struct RoutingDraft: Identifiable {
     var domain = ""
     var port = ""
     var destination: UUID?
+    var destinationProfile: UUID?
     var internalPolicy: InternalRoutingOverride = .inherit
 }
 
@@ -232,7 +265,9 @@ private struct RoutingEditor: View {
     private let editing: UUID?
     @State private var domain: String
     @State private var port: String
+    @ObservedObject private var profiles = Profiles.shared
     @State private var destination: UUID?
+    @State private var destinationProfile: UUID
     @State private var internalPolicy: InternalRoutingOverride
 
     init(browser: Browser, draft: RoutingDraft) {
@@ -240,11 +275,16 @@ private struct RoutingEditor: View {
         editing = draft.ruleID
         _domain = State(initialValue: draft.domain)
         _port = State(initialValue: draft.port)
+        _destinationProfile = State(initialValue: draft.destinationProfile ?? browser.profileID)
         _destination = State(initialValue: draft.destination)
         _internalPolicy = State(initialValue: draft.internalPolicy)
     }
 
-    private var selectedSpace: Space? { browser.spaces.first { $0.id == destination } }
+    private var destinationSpaces: [Space] {
+        guard profiles.list.contains(where: { $0.id == destinationProfile }) else { return [] }
+        return Spaces.read(profile: destinationProfile)
+    }
+    private var selectedSpace: Space? { destinationSpaces.first { $0.id == destination } }
     private var valid: Bool {
         guard let normalized = RoutingConfig.domain(domain), selectedSpace != nil, port.isEmpty || RoutingConfig.port(port) != nil else { return false }
         return !routing.config.rules.contains { $0.domain == normalized && $0.port == RoutingConfig.port(port) && ($0.profileID ?? Profile.personalID) == browser.profileID && $0.id != editing }
@@ -259,9 +299,16 @@ private struct RoutingEditor: View {
             Text("Port").font(.system(size: 12, weight: .medium))
             TextField("Blank for all ports", text: $port)
                 .textFieldStyle(.roundedBorder).accessibilityLabel("Routing port")
+            Picker("Profile", selection: $destinationProfile) {
+                ForEach(profiles.list) { Text($0.name).tag($0.id) }
+                if !profiles.list.contains(where: { $0.id == destinationProfile }) {
+                    Text("Missing profile — choose another").tag(destinationProfile)
+                }
+            }
+            .onChange(of: destinationProfile) { _, _ in destination = destinationSpaces.first?.id }
             Picker("Space", selection: $destination) {
                 Text("Choose a space").tag(nil as UUID?)
-                ForEach(browser.spaces) { space in Text(space.name).tag(Optional(space.id)) }
+                ForEach(destinationSpaces) { space in Text(space.name).tag(Optional(space.id)) }
                 if let destination, selectedSpace == nil {
                     Text("Missing space — choose another").tag(Optional(destination))
                 }
@@ -275,7 +322,7 @@ private struct RoutingEditor: View {
             }
             HStack {
                 Button(editing == nil ? "Add rule" : "Save rule") {
-                    if let space = selectedSpace, routing.save(id: editing, domain: domain, port: RoutingConfig.port(port), space: space, internalPolicy: internalPolicy) { dismiss() }
+                    if let space = selectedSpace, routing.save(id: editing, domain: domain, port: RoutingConfig.port(port), space: space, sourceProfileID: browser.profileID, internalPolicy: internalPolicy) { dismiss() }
                 }.disabled(!valid)
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -295,13 +342,10 @@ extension Browser {
               let rule = Routing.shared.config.match(url, profileID: profileID) else { return false }
         let policy = Routing.shared.config.policy(for: rule)
         guard policy != .current else { return false }
-        guard prefs.usesSpaces else {
-            announce("Link not opened: enable Spaces in Settings → Spaces & Pins")
-            return true
-        }
         let originalSpace = spaceID
         let sourceID = source?.id
-        let destination = spaces.first { $0.id == rule.spaceID }
+        let destinations = Profiles.shared.list.flatMap { Spaces.read(profile: $0.id) }
+        let destination = destinations.first { $0.id == rule.spaceID && $0.profileID == rule.destinationProfile }
         if policy == .destination, destination?.id == originalSpace { return false }
         let open: (UUID?) -> Void = { [weak self] chosen in
             guard let self, let chosen else { return }
@@ -311,14 +355,14 @@ extension Browser {
                 return
             }
             if chosen == originalSpace { current(); return }
-            guard self.spaces.contains(where: { $0.id == chosen }) else {
+            guard let space = destinations.first(where: { $0.id == chosen }),
+                  let target = Routing.browser(for: space.id, profileID: space.profileID, from: self, foreground: foreground) else {
                 self.announce("Link not opened: choose an existing destination in Settings → Routing")
                 return
             }
-            self.switchSpace(to: chosen)
-            guard self.spaceID == chosen else { return }
-            self.open(url, foreground: foreground, mayWait: true)
-            if !foreground { self.switchSpace(to: originalSpace) }
+            target.open(url, foreground: foreground, mayWait: true)
+            if foreground && target !== self { Browsers.show(target) }
+            if !foreground && target === self { self.switchSpace(to: originalSpace) }
         }
         if policy == .destination {
             guard let destination else {
@@ -340,9 +384,11 @@ extension Browser {
         alert.addButton(withTitle: "Cancel")
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
         picker.addItem(withTitle: "Current Space (\(space.name))")
-        let choices = [originalSpace] + spaces.map(\.id)
-        for space in spaces { picker.addItem(withTitle: space.name) }
-        if let destination, let index = spaces.firstIndex(where: { $0.id == destination.id }) {
+        let choices = [originalSpace] + destinations.map(\.id)
+        for space in destinations {
+            picker.addItem(withTitle: "\(Profiles.shared.profile(space.profileID).name) → \(space.name)")
+        }
+        if let destination, let index = destinations.firstIndex(where: { $0.id == destination.id }) {
             picker.selectItem(at: index + 1)
         }
         alert.accessoryView = picker
