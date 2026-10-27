@@ -336,7 +336,7 @@ private struct RoutingEditor: View {
 extension Browser {
     /// Returns true when the original operation is held or cancelled. Only
     /// callers that represent a user's navigation ask this question.
-    func routeInternal(_ url: URL, from source: Tab?, foreground: Bool,
+    func routeInternal(_ url: URL, from source: Tab?, foreground: Bool, link: Bool = false,
                        current: @escaping () -> Void) -> Bool {
         guard source?.shy != true,
               let rule = Routing.shared.config.match(url, profileID: profileID) else { return false }
@@ -360,7 +360,7 @@ extension Browser {
                 self.announce("Link not opened: choose an existing destination in Settings → Routing")
                 return
             }
-            target.open(url, foreground: foreground, mayWait: true)
+            target.open(url, foreground: foreground, mayWait: true, link: link)
             if foreground && target !== self { Browsers.show(target) }
             if !foreground && target === self { self.switchSpace(to: originalSpace) }
         }
@@ -411,11 +411,11 @@ extension Browser {
         }
     }
 
-    func openInternal(_ url: URL, foreground: Bool, from source: Tab?, mayWait: Bool = false) {
+    func openInternal(_ url: URL, foreground: Bool, from source: Tab?, mayWait: Bool = false, link: Bool = false) {
         let current = { [weak self, weak source] in
-            self?.open(url, foreground: foreground, from: source, mayWait: mayWait)
+            self?.open(url, foreground: foreground, from: source, mayWait: mayWait, link: link)
             return ()
         }
-        if !routeInternal(url, from: source, foreground: foreground, current: current) { current() }
+        if !routeInternal(url, from: source, foreground: foreground, link: link, current: current) { current() }
     }
 }

@@ -200,6 +200,12 @@ struct Omnibox: View {
                         .fill(Palette.ink.opacity(0.55))
                         .frame(width: 5, height: 5)
                         .padding(.horizontal, 2)
+                case .bookmark:
+                    // Kept by you, not only visited: the bookmark's mark,
+                    // as quiet as the command's.
+                    Image(systemName: "bookmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.muted)
                 case .command:
                     Image(systemName: "command")
                         .font(.system(size: 10, weight: .medium))
