@@ -11,6 +11,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ## Unreleased
 
+### Routing update
+
+- Routing is visible in the Settings sidebar. Rules can explicitly target a profile and one of its Spaces; links use that destination’s session, while the source tab stays in its original window. Existing rules retain their destinations.
+
 ### Fork additions
 
 - Domain-to-Space routing and per-display sidebar placement retained on Search 1.0.7.

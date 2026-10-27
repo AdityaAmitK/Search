@@ -166,7 +166,7 @@ enum Browsers {
     }
 
     /// A window around `browser`, made here rather than by SwiftUI.
-    static func open(_ browser: Browser, frame: NSRect?) {
+    static func open(_ browser: Browser, frame: NSRect?, foreground: Bool = true) {
         let popup = browser.isPopup
         let host: NSView
         if popup {
@@ -223,10 +223,11 @@ enum Browsers {
             away.append(window)
             return
         }
-        window.makeKeyAndOrderFront(nil)
+        if foreground { window.makeKeyAndOrderFront(nil) }
+        else if !(Store.testing && NSApp.isHidden) { window.orderBack(nil) }
         // Never in a test run: full screen would put a probe's window on a screen.
-        if fullScreen, !Store.testing { window.toggleFullScreen(nil) }
-        comeForward()
+        if foreground, fullScreen, !Store.testing { window.toggleFullScreen(nil) }
+        if foreground { comeForward() }
     }
 
     /// A website controls the requested size, never the bounds of the display.

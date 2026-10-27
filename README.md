@@ -6,6 +6,8 @@ Routing lives directly in this fork's Swift source on the `main` branch. There i
 
 ## Routing
 
+Open Search → Settings (⌘,) → Routing. Rules apply from the profile whose window you are editing. Each rule chooses a destination Profile, then one of that profile’s Spaces. A cross-profile route opens in that profile’s window; it does not move the source tab or share its session. With Spaces disabled, only a profile’s home Space can be targeted. Existing rules retain their original profile and Space.
+
 Enable Spaces, then configure routing in Settings. Rules match a host and its subdomains; a more specific host wins. For example, route `github.com` to Work and `gist.github.com` to Research. Host matching ignores case and a trailing dot, and never matches an unrelated host containing the same text. Destination Spaces are stored by identity, so renaming a Space preserves its rules.
 
 A blank port matches **all ports**. Set a port to narrow a rule, including a local development address such as `localhost` on port `3000`. `localhost`, `127.0.0.1`, and `::1` are supported as exact local hosts; enter the port separately. Explicit port rules also match the scheme's default port when omitted from a URL.
