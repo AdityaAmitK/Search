@@ -221,7 +221,7 @@ final class Links: NSObject, NSApplicationDelegate {
     /// Only addresses handed over by another application use this policy.
     @MainActor
     private static func prepareExternal(_ url: URL, in browser: Browser, foreground: Bool = true) -> Browser? {
-        guard let rule = Routing.shared.config.match(url, profileID: browser.profileID) else { return browser }
+        guard let rule = Routing.shared.config.match(url) else { return browser }
         // Resolve the profile and Space before arrive/open creates the URL's tab.
         return Routing.browser(for: rule.spaceID, profileID: rule.destinationProfile, from: browser, foreground: foreground)
     }
@@ -327,7 +327,7 @@ final class Links: NSObject, NSApplicationDelegate {
         // The space and sign-ins of the window in front, on screen or not.
         let browser = Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
             ?? Browsers.primary ?? SceneSlot.shared.browser
-        guard Routing.shared.config.match(url, profileID: browser.profileID) == nil else { return false }
+        guard Routing.shared.config.match(url) == nil else { return false }
         if !launched { Browsers.keepAway() }
         LittleWindow.show(url, for: browser)
         return true
