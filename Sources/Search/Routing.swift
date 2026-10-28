@@ -215,9 +215,18 @@ struct RoutingPage: View {
     @ObservedObject var browser: Browser
     @ObservedObject private var routing = Routing.shared
     @State private var draft: RoutingDraft?
+    @AppStorage("external.streamy") private var streamy = false
+    @AppStorage("external.linear") private var linear = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Toggle("Open streaming links in Streamy", isOn: $streamy)
+            Text("Links from other apps to YouTube, Netflix, SonyLIV, Prime Video, ZEE5, JioHotstar and FanCode open in Streamy. If Streamy is unavailable, they open here. Make Search your default browser to use this.")
+                .font(.system(size: 12)).foregroundStyle(Palette.muted)
+            Toggle("Open Linear links in Linear", isOn: $linear)
+            Text("Links from other apps to Linear issues, projects and views open in the Linear app. Linear's website and sign-in pages open here.")
+                .font(.system(size: 12)).foregroundStyle(Palette.muted)
+            Divider()
             Toggle("Enable link routing", isOn: Binding(
                 get: { routing.config.enabled }, set: { routing.setEnabled($0) }))
                 .disabled(routing.config.hasDuplicateRules)

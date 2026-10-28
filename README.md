@@ -6,6 +6,10 @@ Routing lives directly in this fork's Swift source on the `main` branch. There i
 
 ## Routing
 
+Search can replace Finicky for Streamy links. In Settings → Routing, enable **Open streaming links in Streamy** and make Search the default browser. Links received from other apps to `youtube.com`, `youtu.be`, `netflix.com`, `sonyliv.com`, `primevideo.com`, `zee5.com`, `hotstar.com`, `jiohotstar.com` and `fancode.com` (including subdomains) go directly to `/Applications/Streamy.app` before Space routing. Other links follow the existing rules. If Streamy is missing or macOS cannot open it, the link falls back to Search. Links followed inside Search retain their existing behavior. Finicky is no longer needed for this routing.
+
+Linear links received from other apps to a workspace's issues, projects, views, inbox or documents open in `/Applications/Linear.app` through its `linear://` scheme. Linear's website, docs and sign-in pages stay in Search. Turn this off with **Open Linear links in Linear** in Settings → Routing.
+
 Open Search → Settings (⌘,) → Routing. Routing is a shared section: every profile sees and edits the same rule list, and each domain/port rule applies from every profile. Each rule chooses a destination Profile, then one of that profile’s Spaces. A cross-profile route opens in that profile’s window; it does not move the source tab or share its session. With Spaces disabled, only a profile’s home Space can be targeted. Existing rules retain their destination profile and Space. If old per-profile rules duplicate a domain/port, routing pauses until those duplicates are resolved.
 
 Enable Spaces, then configure routing in Settings. Rules match a host and its subdomains; a more specific host wins. For example, route `github.com` to Work and `gist.github.com` to Research. Host matching ignores case and a trailing dot, and never matches an unrelated host containing the same text. Destination Spaces are stored by identity, so renaming a Space preserves its rules.

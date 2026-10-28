@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UniformTypeIdentifiers
 
 // Spaces: separate sets of tabs in the one window, each with its own
 // cookies and sign-ins, and a downloads folder of its own if you like.
@@ -35,6 +36,9 @@ struct Space: Codable, Identifiable, Equatable {
     /// The profile it belongs to (see Profiles.swift); nil for Personal,
     /// which every space from before profiles is in.
     var profile: UUID?
+    /// A picture of its own, worn instead of the symbol: a file in
+    /// `SpacePicture.folder`, chosen from the Icon menu.
+    var picture: String?
 
     var profileID: UUID { profile ?? Profile.personalID }
 
@@ -45,6 +49,67 @@ struct Space: Codable, Identifiable, Equatable {
     /// The icon it shows: its own, or a house for the first and a
     /// briefcase for any other that has none yet.
     var symbol: String { icon.flatMap { Spaces.icons.contains($0) ? $0 : nil } ?? (isFirst ? "house" : "briefcase") }
+
+    /// What a menu shows beside its name: the picture, or the symbol.
+    @MainActor var menuImage: NSImage? {
+        guard let image = SpacePicture.image(picture) else {
+            return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
+        let small = image.copy() as? NSImage
+        small?.size = NSSize(width: 16, height: 16)
+        return small
+    }
+}
+
+/// A space's own picture: copied into the store when chosen, so the file
+/// it came from can move or go, and read once.
+@MainActor
+enum SpacePicture {
+    static var folder: URL { Store.file("space-icons") }
+    private static var cache: [String: NSImage] = [:]
+
+    static func image(_ name: String?) -> NSImage? {
+        guard let name else { return nil }
+        if let image = cache[name] { return image }
+        let image = NSImage(contentsOf: folder.appendingPathComponent(name))
+        cache[name] = image
+        return image
+    }
+
+    /// The chosen file, kept under a new name each time so nothing shows a
+    /// picture since replaced.
+    static func adopt(_ url: URL, for id: UUID) -> String? {
+        let name = "\(id.uuidString)-\(Int(Date().timeIntervalSince1970)).\(url.pathExtension.lowercased())"
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard (try? FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(name))) != nil else { return nil }
+        return name
+    }
+
+    static func discard(_ name: String?) {
+        guard let name else { return }
+        cache[name] = nil
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+    }
+}
+
+/// A space's icon in a view: its picture, a little larger than a symbol
+/// so the two read the same size, or its symbol.
+struct SpaceIcon: View {
+    let symbol: String
+    let picture: String?
+    var size: CGFloat = 12
+
+    var body: some View {
+        if let image = SpacePicture.image(picture) {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size + 3, height: size + 3)
+        } else {
+            Image(systemName: symbol)
+        }
+    }
 }
 
 enum Spaces {
@@ -407,6 +472,18 @@ extension Browser {
     func setSpaceIcon(_ id: UUID, to icon: String) {
         guard let at = spaces.firstIndex(where: { $0.id == id }) else { return }
         spaces[at].icon = icon
+        SpacePicture.discard(spaces[at].picture)
+        spaces[at].picture = nil
+        Spaces.write(spaces, profile: profileID)
+    }
+
+    /// A picture for the space from a file, or nil to go back to its symbol.
+    func setSpacePicture(_ id: UUID, from file: URL?) {
+        guard let at = spaces.firstIndex(where: { $0.id == id }) else { return }
+        let adopted = file.flatMap { SpacePicture.adopt($0, for: id) }
+        guard file == nil || adopted != nil else { return }
+        SpacePicture.discard(spaces[at].picture)
+        spaces[at].picture = adopted
         Spaces.write(spaces, profile: profileID)
     }
 
@@ -460,7 +537,7 @@ struct SpaceDot: View {
     /// What is drawn, a step behind the browser: the space changes in a
     /// frame with nothing animated (see SpaceSwipe.slide), and the icon
     /// turns over just after, on a change of its own.
-    @State private var shown: (key: String, symbol: String)?
+    @State private var shown: (key: String, symbol: String, picture: String?)?
     /// The space's name, for a moment after a switch (see naming()).
     @State private var named: String?
     @State private var naming = 0
@@ -468,12 +545,13 @@ struct SpaceDot: View {
     static let width: CGFloat = 26
 
     private var symbol: String { browser.makingSpace ? "plus" : browser.space.symbol }
-    private var key: String { browser.makingSpace ? "new" : "\(browser.spaceID.uuidString)-\(browser.space.symbol)" }
+    private var picture: String? { browser.makingSpace ? nil : browser.space.picture }
+    private var key: String { browser.makingSpace ? "new" : "\(browser.spaceID.uuidString)-\(browser.space.symbol)-\(picture ?? "")" }
 
     var body: some View {
         Button { SpaceMenu.show(for: browser) } label: {
             ZStack {
-                Image(systemName: shown?.symbol ?? symbol)
+                SpaceIcon(symbol: shown?.symbol ?? symbol, picture: shown.map(\.picture) ?? picture)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(hovering ? Palette.ink : Palette.muted)
                     .id(shown?.key ?? key)
@@ -495,9 +573,9 @@ struct SpaceDot: View {
         .onHover { hovering = $0 }
         .help("\(browser.space.name) — ⌃1–⌃9, or two fingers \(browser.prefs.sidebar ? "sideways" : "up or down") over the tabs, to switch")
         .onChange(of: key) { _, now in
-            let symbol = symbol
+            let symbol = symbol, picture = picture
             DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.22)) { shown = (now, symbol) }
+                withAnimation(.easeOut(duration: 0.22)) { shown = (now, symbol, picture) }
             }
         }
         .onChange(of: browser.spaceID) { _, _ in name() }
@@ -573,7 +651,7 @@ enum SpaceMenu {
             let entry = item(space.name, key: index < 9 ? "\(index + 1)" : "", checked: space.id == browser.spaceID) {
                 browser.switchSpace(to: space.id)
             }
-            entry.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
+            entry.image = space.menuImage
             menu.addItem(entry)
         }
         menu.addItem(.separator())
@@ -594,9 +672,18 @@ enum SpaceMenu {
         })
         let icons = NSMenu()
         for (symbol, name) in zip(Spaces.icons, Spaces.iconNames) {
-            let choice = item(name, checked: here.symbol == symbol) { browser.setSpaceIcon(here.id, to: symbol) }
+            let choice = item(name, checked: here.picture == nil && here.symbol == symbol) { browser.setSpaceIcon(here.id, to: symbol) }
             choice.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             icons.addItem(choice)
+        }
+        icons.addItem(.separator())
+        let picture = item("Choose Image…", checked: here.picture != nil) {
+            Ask.picture { browser.setSpacePicture(here.id, from: $0) }
+        }
+        picture.image = here.picture == nil ? nil : here.menuImage
+        icons.addItem(picture)
+        if here.picture != nil {
+            icons.addItem(item("Remove Image") { browser.setSpacePicture(here.id, from: nil) })
         }
         let icon = NSMenuItem(title: "Icon", action: nil, keyEquivalent: "")
         icon.submenu = icons
@@ -726,6 +813,17 @@ enum Ask {
         panel.canCreateDirectories = true
         panel.prompt = "Use for This Space"
         panel.message = "Downloads in this space go here. Cancel keeps the folder it has."
+        guard let window = Links.window else { return }
+        panel.beginSheetModal(for: window) { answer in
+            if answer == .OK, let url = panel.url { then(url) }
+        }
+    }
+
+    static func picture(then: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Use for This Space"
+        panel.message = "A square image works best: it is shown at the size of an icon."
         guard let window = Links.window else { return }
         panel.beginSheetModal(for: window) { answer in
             if answer == .OK, let url = panel.url { then(url) }

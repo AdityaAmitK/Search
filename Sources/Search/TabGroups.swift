@@ -220,7 +220,7 @@ private struct GroupHeadingShared: ViewModifier {
                             Button {
                                 browser.move(group: group.id, toSpace: space.id)
                             } label: {
-                                Label(space.name, systemImage: space.symbol)
+                                Label { Text(space.name) } icon: { space.menuImage.map { Image(nsImage: $0) } }
                             }
                         }
                     }

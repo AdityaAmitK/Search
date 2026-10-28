@@ -255,6 +255,8 @@ final class Links: NSObject, NSApplicationDelegate {
         waiting = []
         guard let first = early.first else { return }
         onceShown { [weak browser] in
+            // A mixed launch may also have handed a streaming link away.
+            Browsers.bringBack()
             if let browser, let target = prepareExternal(first, in: browser) { target.arrive(first) }
             comeForward()
             for (n, url) in early.dropFirst().enumerated() {
@@ -305,7 +307,8 @@ final class Links: NSObject, NSApplicationDelegate {
     /// A link as another app hands one over, for the bench.
     static func arrived(_ url: URL) { take(url) }
 
-    private static func take(_ url: URL) {
+    private static func take(_ url: URL, handOff: Bool = true) {
+        if handOff, MainActor.assumeIsolated({ openInStreamy(url) || openInLinear(url) }) { return }
         if MainActor.assumeIsolated({ little(url) }) { return }
         if let deliver {
             deliver(url)
@@ -313,6 +316,55 @@ final class Links: NSObject, NSApplicationDelegate {
             waiting.append(url)
             DispatchQueue.main.async { summon() }
         }
+    }
+
+    /// Local replacement for Finicky: only links received from other apps.
+    @MainActor
+    private static func openInStreamy(_ url: URL) -> Bool {
+        guard Store.settings.bool(forKey: "external.streamy"),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased(),
+              ["youtube.com", "youtu.be", "netflix.com", "sonyliv.com", "primevideo.com",
+               "zee5.com", "hotstar.com", "jiohotstar.com", "fancode.com"].contains(where: {
+                  host == $0 || host.hasSuffix("." + $0)
+              }) else { return false }
+        return handOff(url, to: "/Applications/Streamy.app", fallback: url)
+    }
+
+    /// A link into a Linear workspace from another app, as Linear's own
+    /// linear:// link, so the desktop app opens it. Linear's site, docs and
+    /// sign-in pages stay here.
+    @MainActor
+    private static func openInLinear(_ url: URL) -> Bool {
+        guard Store.settings.object(forKey: "external.linear") as? Bool ?? true,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              ["linear.app", "www.linear.app"].contains(url.host?.lowercased() ?? "") else { return false }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        let inApp: Set = ["issue", "issues", "project", "projects", "team", "view", "views", "document", "docs",
+                          "initiative", "initiatives", "inbox", "my-issues", "cycle", "cycles", "roadmap",
+                          "settings", "search", "customers", "customer", "reviews", "review", "pulse", "dashboards"]
+        guard parts.count >= 2, inApp.contains(parts[1].lowercased()),
+              var link = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        link.scheme = "linear"
+        link.host = parts[0]
+        link.path = "/" + parts.dropFirst().joined(separator: "/")
+        guard let desktop = link.url else { return false }
+        return handOff(desktop, to: "/Applications/Linear.app", fallback: url)
+    }
+
+    /// Opens the link in that app; if it can't, the original comes here.
+    @MainActor
+    private static func handOff(_ url: URL, to path: String, fallback: URL) -> Bool {
+        guard !Store.testing else { return false }
+        let app = URL(fileURLWithPath: path, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: app.path) else { return false }
+        if !launched { Browsers.keepAway() }
+        // Target the app explicitly, so macOS cannot send this back to Search.
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: .init()) { _, error in
+            guard error != nil else { return }
+            DispatchQueue.main.async { take(fallback, handOff: false) }
+        }
+        return true
     }
 
     /// In a small window of its own, for whoever chose that (see
