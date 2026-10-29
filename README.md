@@ -6,9 +6,14 @@ Routing lives directly in this fork's Swift source on the `main` branch. There i
 
 ## Routing
 
-Search can replace Finicky for Streamy links. In Settings → Routing, enable **Open streaming links in Streamy** and make Search the default browser. Links received from other apps to `youtube.com`, `youtu.be`, `netflix.com`, `sonyliv.com`, `primevideo.com`, `zee5.com`, `hotstar.com`, `jiohotstar.com` and `fancode.com` (including subdomains) go directly to `/Applications/Streamy.app` before Space routing. Other links follow the existing rules. If Streamy is missing or macOS cannot open it, the link falls back to Search. Links followed inside Search retain their existing behavior. Finicky is no longer needed for this routing.
+Settings → Routing → **Open in apps** sends links to their apps instead of a tab. Each rule names an app, the sites it takes (subdomains included), optionally a path pattern (a regular expression) and an app link template such as `linear://{path}{query}{fragment}`, and where it applies: links from other apps, addresses typed in the address field, and links clicked in a page on another site. Rules start with Streamy and Linear, set as the earlier switches were.
 
-Linear links received from other apps to a workspace's issues, projects, views, inbox or documents open in `/Applications/Linear.app` through its `linear://` scheme. Linear's website, docs and sign-in pages stay in Search. Turn this off with **Open Linear links in Linear** in Settings → Routing.
+- **Address field:** when Return would send an address to an app, the app's icon and name show beside what's typed, and matching suggestions carry the app's icon. Return opens the address in the app. **⌥Return** (or ⌥-click on a suggestion) opens it here, and ⌘Return opens it in a new tab here. Site searches count too, so a YouTube search goes to Streamy.
+- **Links in pages:** a plain click on a link to the app's sites, from a page on another site, opens the app. ⌘-click keeps it here. Pages already on the app's sites, and private tabs, keep their links.
+- **Streamy:** the rule follows the sites Streamy lists for itself in `~/Library/Application Support/com.aditya.streamy/search-links.json`, so sources added in Streamy route without changing Search. It falls back to YouTube, Netflix, SonyLIV, Prime Video, ZEE5, JioHotstar and FanCode until Streamy writes that file. Finicky is no longer needed.
+- **No loops:** a link is never handed back to the app that sent it. If the app is missing or macOS can't open it, the link opens here.
+
+Any app can take part by writing `{"hosts": ["example.com"]}` to `~/Library/Application Support/<its bundle id>/search-links.json` and having its rule use **the sites the app lists for itself**.
 
 Open Search → Settings (⌘,) → Routing. Routing is a shared section: every profile sees and edits the same rule list, and each domain/port rule applies from every profile. Each rule chooses a destination Profile, then one of that profile’s Spaces. A cross-profile route opens in that profile’s window; it does not move the source tab or share its session. With Spaces disabled, only a profile’s home Space can be targeted. Existing rules retain their destination profile and Space. If old per-profile rules duplicate a domain/port, routing pauses until those duplicates are resolved.
 

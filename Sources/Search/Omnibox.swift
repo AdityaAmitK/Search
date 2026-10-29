@@ -79,8 +79,13 @@ struct Omnibox: View {
                     .transition(.scale(scale: 0.9, anchor: .leading).combined(with: .opacity))
             }
             AddressField(browser: browser)
+            if let app = browser.appAhead {
+                AppLinkBadge(link: app)
+                    .transition(.scale(scale: 0.9, anchor: .trailing).combined(with: .opacity))
+            }
         }
             .animation(Motion.quick, value: browser.siteChip)
+            .animation(Motion.quick, value: browser.appAhead?.id)
             .frame(height: 22)
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
@@ -148,6 +153,11 @@ struct Omnibox: View {
 
     /// One row of a list of places, here and under the field in the tab.
     struct Row: View {
+        static func isCommand(_ offer: Suggestion) -> Bool {
+            if case .command = offer.kind { return true }
+            return false
+        }
+
         let offer: Suggestion
         /// Where the arrow keys have walked to. The pointer gets its own,
         /// quieter mark, and changes nothing but the look of the row.
@@ -210,6 +220,15 @@ struct Omnibox: View {
                         .truncationMode(.tail)
                 }
                 Spacer(minLength: 0)
+                // Where Return takes this row, when that's an app.
+                if offer.tab == nil, offer.kind != .suggested, !Self.isCommand(offer),
+                   let app = AppLinks.shared.match(offer.url, scope: .address)?.link {
+                    Image(nsImage: AppLinks.icon(app))
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 16, height: 16)
+                        .help("Opens in \(app.name). ⌥Return or ⌥-click opens it here.")
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -536,6 +555,10 @@ struct AddressField: NSViewRepresentable {
             switch command {
             case #selector(NSResponder.insertNewline(_:)):
                 browser.submit()
+                return true
+            case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+                // ⌥Return: here, even where an app would take it.
+                browser.submit(here: true)
                 return true
             case #selector(NSResponder.moveDown(_:)):
                 browser.walk(1)

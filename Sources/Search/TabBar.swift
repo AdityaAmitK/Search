@@ -1157,6 +1157,10 @@ struct TabAddressField: NSViewRepresentable {
                 // refused address stay on screen instead of being thrown away.
                 browser.commitTabEdit()
                 return true
+            case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+                // ⌥Return: here, even where an app would take it.
+                browser.commitTabEdit(here: true)
+                return true
             case #selector(NSResponder.cancelOperation(_:)):
                 browser.cancelTabEdit()
                 return true

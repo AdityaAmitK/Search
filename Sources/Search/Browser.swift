@@ -1849,7 +1849,7 @@ final class Browser: NSObject, ObservableObject {
         editingTab = tab.id
     }
 
-    func commitTabEdit() {
+    func commitTabEdit(here: Bool = false) {
         guard let id = editingTab, let tab = tabs.first(where: { $0.id == id }) else { return }
         if renamingTab {
             let typed = tabDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1870,6 +1870,7 @@ final class Browser: NSObject, ObservableObject {
         editingTab = nil
         tabOffers = []
         tabPicked = nil
+        if !here, handToApp(url, otherwise: { [weak self, weak tab] in self?.navigateInternal(url, in: tab) }) { return }
         navigateInternal(url, in: tab)
     }
 
@@ -5622,10 +5623,17 @@ final class Browser: NSObject, ObservableObject {
     /// resting cursor would otherwise rewrite the field before you had moved.
     func take(_ offer: Suggestion) {
         summoning = false
+        let launching = launching
+        let source = active ?? tabs.first
         if case .command(let command) = offer.kind {
             command.run(on: self)
         } else if let id = offer.tab, let tab = tabs.first(where: { $0.id == id }) {
             select(tab)
+        } else if !NSEvent.modifierFlags.contains(.option), handToApp(offer.url, otherwise: { [weak self] in
+            if launching { self?.openInternal(offer.url, foreground: true, from: self?.active) }
+            else { self?.navigateInternal(offer.url, in: source) }
+        }) {
+            // Gone to its app (AppLinks.swift).
         } else if launching {
             openInternal(offer.url, foreground: true, from: active)
         } else {
@@ -5725,7 +5733,10 @@ final class Browser: NSObject, ObservableObject {
     /// `aside`: ⌘Return, as in Safari. The place opens in a new tab and the
     /// tab you were on is left as it was, behind it unless `front` (⇧⌘Return)
     /// asks to go there.
-    func submit(aside: Bool = false, front: Bool = false) {
+    ///
+    /// An address one of Settings › Routing's apps takes goes to that app
+    /// (AppLinks.swift), unless `here` (⌥Return) or `aside` keeps it in a tab.
+    func submit(aside: Bool = false, front: Bool = false, here: Bool = false) {
         // A page already open is switched to, not opened again.
         if let picked, offers.indices.contains(picked),
            let id = offers[picked].tab,
@@ -5779,6 +5790,19 @@ final class Browser: NSObject, ObservableObject {
         guard let url = target else {
             refusals += 1
             return
+        }
+        if !here, !aside {
+            let launching = launching
+            let source = active ?? tabs.first
+            if handToApp(url, otherwise: { [weak self] in
+                if launching { self?.openInternal(url, foreground: true, from: self?.active) }
+                else { self?.navigateInternal(url, in: source) }
+            }) {
+                editing = false
+                typed = ""
+                picked = nil
+                return
+            }
         }
         // search://settings and the rest: the page's own tab, one of each.
         if let page = InternalPage(url: url) {
@@ -5999,6 +6023,22 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // its own, and letting this one through would take the page there too.
         if action.navigationType == .linkActivated, action.buttonNumber == 4 {
             decisionHandler(.cancel)
+            return
+        }
+        // A plain click on a link to a site one of Settings › Routing's apps
+        // takes, from a page on another site: to the app (AppLinks.swift).
+        // ⌘-click keeps it here, and a page on the app's own sites keeps its
+        // links, so YouTube opened here on purpose stays here. A private tab
+        // keeps its links too: an app would carry them out of it.
+        if action.navigationType == .linkActivated, action.targetFrame?.isMainFrame == true,
+           tab(for: webView)?.shy != true,
+           action.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+           (action.request.httpMethod ?? "GET").uppercased() == "GET",
+           let (link, target) = AppLinks.shared.match(url, scope: .pages),
+           !AppLinks.shared.covers(link, page: webView.url) {
+            decisionHandler(.cancel)
+            let request = action.request
+            AppLinks.shared.launch(target, in: link) { [weak webView] in webView?.load(request) }
             return
         }
         if action.navigationType == .linkActivated, action.sourceFrame.isMainFrame,

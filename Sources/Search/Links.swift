@@ -172,7 +172,10 @@ final class Links: NSObject, NSApplicationDelegate {
         guard let text = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
               let url = URL(string: text), url.scheme?.lowercased().hasPrefix("http") == true
         else { return }
-        Links.take(url)
+        // Which app sent it, so an app's link is never handed straight back.
+        let pid = event.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
+        let sender = pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+        Links.take(url, sender: sender)
     }
 
     /// Files and anything else the system opens with the app: an address, or
@@ -307,8 +310,8 @@ final class Links: NSObject, NSApplicationDelegate {
     /// A link as another app hands one over, for the bench.
     static func arrived(_ url: URL) { take(url) }
 
-    private static func take(_ url: URL, handOff: Bool = true) {
-        if handOff, MainActor.assumeIsolated({ openInStreamy(url) || openInLinear(url) }) { return }
+    private static func take(_ url: URL, handOff: Bool = true, sender: String? = nil) {
+        if handOff, MainActor.assumeIsolated({ toApp(url, sender: sender) }) { return }
         if MainActor.assumeIsolated({ little(url) }) { return }
         if let deliver {
             deliver(url)
@@ -318,38 +321,13 @@ final class Links: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Local replacement for Finicky: only links received from other apps.
+    /// A link from another app that one of Settings › Routing's apps takes
+    /// (AppLinks.swift) — Streamy, Linear — goes there instead; never back
+    /// to the app that sent it.
     @MainActor
-    private static func openInStreamy(_ url: URL) -> Bool {
-        guard Store.settings.bool(forKey: "external.streamy"),
-              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              let host = url.host?.lowercased(),
-              ["youtube.com", "youtu.be", "netflix.com", "sonyliv.com", "primevideo.com",
-               "zee5.com", "hotstar.com", "jiohotstar.com", "fancode.com"].contains(where: {
-                  host == $0 || host.hasSuffix("." + $0)
-              }) else { return false }
-        return handOff(url, to: "/Applications/Streamy.app", fallback: url)
-    }
-
-    /// A link into a Linear workspace from another app, as Linear's own
-    /// linear:// link, so the desktop app opens it. Linear's site, docs and
-    /// sign-in pages stay here.
-    @MainActor
-    private static func openInLinear(_ url: URL) -> Bool {
-        guard Store.settings.object(forKey: "external.linear") as? Bool ?? true,
-              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              ["linear.app", "www.linear.app"].contains(url.host?.lowercased() ?? "") else { return false }
-        let parts = url.pathComponents.filter { $0 != "/" }
-        let inApp: Set = ["issue", "issues", "project", "projects", "team", "view", "views", "document", "docs",
-                          "initiative", "initiatives", "inbox", "my-issues", "cycle", "cycles", "roadmap",
-                          "settings", "search", "customers", "customer", "reviews", "review", "pulse", "dashboards"]
-        guard parts.count >= 2, inApp.contains(parts[1].lowercased()),
-              var link = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        link.scheme = "linear"
-        link.host = parts[0]
-        link.path = "/" + parts.dropFirst().joined(separator: "/")
-        guard let desktop = link.url else { return false }
-        return handOff(desktop, to: "/Applications/Linear.app", fallback: url)
+    private static func toApp(_ url: URL, sender: String?) -> Bool {
+        guard let (link, target) = AppLinks.shared.match(url, scope: .apps, sender: sender) else { return false }
+        return handOff(target, to: link.app, fallback: url)
     }
 
     /// Opens the link in that app; if it can't, the original comes here.
