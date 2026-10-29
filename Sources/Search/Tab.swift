@@ -2092,6 +2092,13 @@ final class PageView: WKWebView {
             menu.addItem(.separator())
             menu.addItem(item)
         }
+        // Inspect Element: WebKit's own, which opens the inspector onto the
+        // element, then Search's tools over it (DevTools.swift).
+        if let item = menu.items.first(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierInspectElement" }) {
+            inspectElement = (item.target, item.action)
+            item.target = self
+            item.action = #selector(inspectElement(_:))
+        }
         if let item = menu.items.first(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierSearchWeb" }),
            let name = searchName?() {
             webSearch = (item.target, item.action)
@@ -2181,6 +2188,15 @@ final class PageView: WKWebView {
     func takeBehind() -> Bool {
         defer { behindSince = nil }
         return behindSince.map { Date().timeIntervalSince($0) < 1 } ?? false
+    }
+
+    /// WebKit's Inspect Element, handed on before the tools are put over it.
+    private var inspectElement: (target: AnyObject?, action: Selector?) = (nil, nil)
+
+    @objc private func inspectElement(_ item: NSMenuItem) {
+        guard let action = inspectElement.action else { return }
+        NSApp.sendAction(action, to: inspectElement.target, from: item)
+        DevTools.mount(self, panel: "elements")
     }
 
     /// WebKit's Copy Link, for Copy Clean Link to clean what it copies.

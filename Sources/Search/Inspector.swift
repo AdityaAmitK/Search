@@ -7,7 +7,8 @@ import WebKit
 //
 // WebKit answers for its inspector only through names outside the public
 // framework, so each is asked for before it is used; a WebKit without them
-// leaves the menu doing nothing rather than the app falling over.
+// leaves the menu doing nothing rather than the app falling over. Each way in
+// also brings Search's own tools over WebKit's (DevTools.swift).
 
 extension Browser {
     /// ⌥⌘I: the inspector, or put away if it is up.
@@ -17,6 +18,7 @@ extension Browser {
             send(inspector, "close")
         } else {
             send(inspector, "show")
+            mountDevTools()
         }
     }
 
@@ -24,6 +26,7 @@ extension Browser {
     func showConsole() {
         guard let inspector = inspector() else { return }
         send(inspector, "showConsole")
+        mountDevTools(panel: "console")
     }
 
     /// ⌥⌘C: the inspector, and the next click on the page picks what it
@@ -32,16 +35,19 @@ extension Browser {
         guard let inspector = inspector() else { return }
         if !asks(inspector, "isVisible") { send(inspector, "show") }
         send(inspector, "toggleElementSelection")
+        mountDevTools(panel: "elements")
     }
 
     /// The inspector of the tab in front — none for a blank tab, which has
     /// no page to look at.
     private func inspector() -> NSObject? {
         guard let tab = active, tab.isWeb else { return nil }
-        let web = tab.web
-        let get = NSSelectorFromString("_inspector")
-        guard web.responds(to: get) else { return nil }
-        return web.perform(get)?.takeUnretainedValue() as? NSObject
+        return DevTools.inspector(of: tab.web)
+    }
+
+    private func mountDevTools(panel: String? = nil) {
+        guard let tab = active, tab.isWeb else { return }
+        DevTools.mount(tab.web, panel: panel)
     }
 
     private func send(_ inspector: NSObject, _ name: String) {

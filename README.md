@@ -20,6 +20,12 @@ External links use the matched destination Space. For links followed inside Sear
 
 Initial rules send social/video hosts to Personal and development/work hosts to Work when those Spaces exist. Rules can be edited, disabled, or deleted, and an empty list stays empty. Unmatched links retain Search's normal behavior.
 
+## Developer tools
+
+Inspect Element, ⌥⌘I, ⌥⌘J and ⌥⌘C open Search's own developer tools: Elements (DOM tree, editable attributes and styles, computed styles, box model, forced states, find), Console (object previews, `console.table`, completion, history), Network (filters, waterfall, headers, payload, preview, response, timing, WebSocket messages, copy as cURL or fetch, replay) and Storage (local and session storage, cookies, IndexedDB, Cache Storage and service workers, each editable, plus Clear site data).
+
+They are drawn over WebKit's own Web Inspector, which stays in charge of the connection to the page. The tools live in `DevTools/` and are copied into the app's resources by `build.sh`. Choose **⋯ → Use Safari's inspector** for WebKit's UI (the debugger, timelines, audits). The **Search DevTools** button in its corner brings these tools back. This relies on private WebKit interfaces; if a macOS update removes them, WebKit's inspector opens as before.
+
 ## Build and validate
 
 Requires macOS 14 or later, Python 3, Git, and the Xcode tools needed by upstream Search. Clone this fork's maintained branch:
