@@ -52,6 +52,18 @@ extension Browser {
     func peek(_ out: Bool) {
         withAnimation(Motion.folding(out: out)) { peeking = out }
     }
+
+    /// Whether something of the window's lies over `page` at `point`, in the
+    /// window's own coordinates: a peek over the page in front (not over its
+    /// own), or the folded column or strip out over the page. The page then
+    /// hears nothing of the pointer there (see PageView.underCover).
+    func covers(_ page: NSView, at point: NSPoint) -> Bool {
+        guard let window, page.window === window else { return false }
+        if let peek = peekTab, peek.built !== page { return true }
+        guard folded, peeking, active?.immersed != true, let size = window.contentView?.bounds.size else { return false }
+        if !prefs.sidebar { return point.y >= size.height - Metrics.strip }
+        return prefs.sidePosition == .right ? point.x >= size.width - prefs.columnWidth : point.x <= prefs.columnWidth
+    }
 }
 
 /// Over the window while the column or the strip is folded: the column or
@@ -195,7 +207,14 @@ struct Fold: View {
         .onChange(of: browser.sidePosition) { _, _ in
             resetPending()
             browser.peeking = false
-            if let bar = Fold.titlebar { Fold.reset(bar, hidden: lightsOff) }
+            // This window's own bar: every window hears the change, and each
+            // had set the front window's by its own fold, the last one
+            // deciding. In full screen the buttons are macOS's to show (see
+            // hideLights); hidden here, they were missing from the bar that
+            // comes down with the menu bar until the column next came out.
+            if let window = browser.window, let bar = window.standardWindowButton(.closeButton)?.superview {
+                Fold.reset(bar, hidden: lightsOff && !window.styleMask.contains(.fullScreen))
+            }
         }
         .onChange(of: prefs.columnWidth) { _, _ in
             if browser.folded { hideLights() }

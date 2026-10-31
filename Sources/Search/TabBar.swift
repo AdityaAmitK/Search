@@ -352,7 +352,7 @@ struct TabBar: View {
         } else {
             TabPill(browser: browser, prefs: browser.prefs, tab: tab,
                     live: tab.id == activeID, width: width, room: room, pill: pill,
-                    close: interactive ? { browser.close(tab) } : {})
+                    close: interactive ? { browser.closeTab(tab) } : {})
         }
     }
 
@@ -1380,9 +1380,18 @@ struct TabMenu: View {
         }
         .disabled(browser.awake(because: tab) != nil)
         Divider()
-        Button("Close Tab", action: close)
+        // Right-clicked among tabs picked in the column: all of them, as ⌘W
+        // closes them.
+        let picked = browser.selectedTabIDs.contains(tab.id) ? browser.visibleSelectedTabCount : 1
+        if picked > 1 {
+            Button("Close \(picked) Tabs") { browser.closePickedTabs() }
+        } else {
+            Button("Close Tab", action: close)
+        }
         Button("Close Other Tabs") { browser.closeOthers(but: tab) }
             .disabled(browser.tabs.count < 2)
+        Button(browser.prefs.sidebar ? "Close Tabs Below" : "Close Tabs to the Right") { browser.closeTabsBelow(tab) }
+            .disabled(browser.tabsBelow(tab).isEmpty)
         // ⌘⇧T, and the History menu's Recently Closed, where few think to
         // look for it: here too, where tabs are closed.
         Button(browser.reopenTitle) { browser.reopen() }

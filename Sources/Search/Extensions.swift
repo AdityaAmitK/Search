@@ -267,7 +267,15 @@ final class Extensions: NSObject, ObservableObject {
 
     private func forgetWorkersIfChanged() async {
         guard Store.settings.string(forKey: Extensions.workersKey) != workers else { return }
-        await Store.websites.removeData(ofTypes: [WKWebsiteDataTypeServiceWorkerRegistrations], modifiedSince: .distantPast)
+        // With no extension there is no stale copy to clear, only the sites'
+        // own workers to lose. The list holds the shim's version, which
+        // changes with nearly every update, so every update cost everyone
+        // the workers of Google Docs, Gmail, X, YouTube…: each site started
+        // from the network again and registered and filled its worker anew,
+        // and the first days after an update felt slower (idea 446).
+        if !installed.isEmpty {
+            await Store.websites.removeData(ofTypes: [WKWebsiteDataTypeServiceWorkerRegistrations], modifiedSince: .distantPast)
+        }
         Store.settings.set(workers, forKey: Extensions.workersKey)
     }
 
@@ -581,6 +589,7 @@ final class Extensions: NSObject, ObservableObject {
         // Its side panel, and what it said about it.
         SidePanelPages.shared.forget(id)
         ExtensionShims.panelTabs[id] = nil
+        ExtensionShims.panelTabIDs[id] = nil
         ExtensionShims.panelOff.remove(id)
         if let held = ExtensionShims.awake.removeValue(forKey: id) { IOPMAssertionRelease(held) }
         // Its ports read as gone only once WebKit has had a turn.
@@ -804,6 +813,39 @@ final class Extensions: NSObject, ObservableObject {
         return true
     }
 
+    struct RecordedError {
+        let domain: String
+        let code: Int
+        let text: String
+        let userInfo: [String: Any]
+    }
+
+    /// A context's errors, read as plain Objective-C objects. WebKit hands
+    /// them out as WKNSError, an NSProxy that forwards to an NSError it makes
+    /// on demand, not an NSError subclass. Bridging one through Swift's
+    /// `Error` (`context.errors`, then `as NSError`) went through
+    /// `_convertErrorToNSError`, which on macOS 15 returned a bad pointer
+    /// (0x8): 1.0.7 quit when 1Password's button recorded an error. Messages
+    /// sent through the proxy reach the real error, so nothing here casts.
+    nonisolated static func errors(of context: WKWebExtensionContext) -> [RecordedError] {
+        errors(in: context.value(forKey: "errors"))
+    }
+
+    nonisolated static func errors(in value: Any?) -> [RecordedError] {
+        guard let array = value as? NSArray else { return [] }
+        return (0..<array.count).compactMap { index in
+            let item = array.object(at: index) as AnyObject
+            guard item.responds(to: NSSelectorFromString("domain")),
+                  let domain = item.value(forKey: "domain") as? String else { return nil }
+            return RecordedError(
+                domain: domain,
+                code: (item.value(forKey: "code") as? NSNumber)?.intValue ?? 0,
+                text: (item.value(forKey: "localizedDescription") as? String) ?? "",
+                userInfo: (item.value(forKey: "userInfo") as? [String: Any]) ?? [:]
+            )
+        }
+    }
+
     /// WebKit records a worker that failed to start as an error on its
     /// context, and then doesn't try again: the extension would be dead
     /// until someone noticed. It is taken up afresh as soon as that shows.
@@ -814,9 +856,8 @@ final class Extensions: NSObject, ObservableObject {
         errorWatchers[id] = NotificationCenter.default.addObserver(forName: WKWebExtensionContext.errorsDidUpdateNotification, object: context, queue: .main) { [weak self, weak context] _ in
             MainActor.assumeIsolated {
                 guard let self, let context, self.contexts[id] === context else { return }
-                let failed = context.errors.contains { error in
-                    let e = error as NSError
-                    return e.domain == WKWebExtensionContext.errorDomain && e.code == WKWebExtensionContext.Error.backgroundContentFailedToLoad.rawValue
+                let failed = Extensions.errors(of: context).contains {
+                    $0.domain == WKWebExtensionContext.errorDomain && $0.code == WKWebExtensionContext.Error.backgroundContentFailedToLoad.rawValue
                 }
                 guard failed else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -1482,9 +1523,10 @@ final class Extensions: NSObject, ObservableObject {
         Extensions.pressed[id] = Date()
         let tab = activeAdapter(for: context)
         if let tab { context.userGesturePerformed(in: tab) }
-        // An extension that asked for its button to open its side panel.
-        if ExtensionShims.panelOnClick.contains(id), context.action(for: tab)?.presentsPopup != true {
-            ExtensionShims.openPanel(context, owner: self)
+        // An extension that asked for its button to open its side panel,
+        // with one turned on over this tab.
+        if ExtensionShims.panelOnClick.contains(id), context.action(for: tab)?.presentsPopup != true,
+           ExtensionShims.openPanel(context, owner: self) {
             return
         }
         // A popup is opened here, straight away. Left to WebKit, it builds

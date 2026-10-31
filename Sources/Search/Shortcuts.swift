@@ -168,6 +168,7 @@ struct Command: Identifiable {
         Command("file.closeWindow", "Close Window", .file, KeyCombo("w", shift: true)) { $0.closeWindow() },
         Command("file.import", "Bring Things Over…", .file, nil) { $0.bringingIn = "" },
         Command("file.share", "Share…", .file, nil) { $0.share() },
+        Command("file.savePage", "Save Page As…", .file, nil) { $0.savePage() },
         Command("file.exportPDF", "Export as PDF…", .file, nil) { $0.exportPDF() },
         Command("file.print", "Print…", .file, KeyCombo("p")) { $0.printPage() },
 
@@ -260,7 +261,7 @@ struct Command: Identifiable {
 
         Command("history.show", "Show History…", .history, KeyCombo("y")) { $0.recalling = true },
         Command("history.downloads", "Downloads…", .history, KeyCombo("j", shift: true)) { $0.hoarding = true },
-        Command("history.clearData", "Clear Browsing Data…", .history, KeyCombo("delete", shift: true)) { $0.recallMode = .clearing },
+        Command("history.clearData", "Clear Browsing Data…", .history, KeyCombo("delete", shift: true)) { $0.clearBrowsingData() },
         Command("history.clear", "Clear History", .history, nil) { $0.clearHistory() },
     ] + (1...9).map { number in
         Command("spaces.\(number)", "Space \(number)", .spaces,

@@ -567,8 +567,8 @@ final class Tab: ObservableObject, Identifiable {
     var duskFrames: [WKFrameInfo] = []
     /// Silenced by hand from its speaker or its menu: the page plays on and
     /// is not heard. WebKit keeps the mute on the view from one page to the
-    /// next, so it is only set again on a view built new, as a sleeping tab
-    /// wakes (see build()).
+    /// next, so it is set on a view built new before that view begins loading
+    /// the tab's page (see build()).
     @Published var muted = false
     /// An extension is recording from this tab's page (see RecordingIndicator).
     @Published var recording = false
@@ -599,6 +599,9 @@ final class Tab: ObservableObject, Identifiable {
     /// download it and then, on at least some sites, does neither — see
     /// ImageMenu.swift for why this is built rather than patched.
     var onImageMenu: ((Tab, URL) -> Void)?
+    /// WebKit's Copy Image (true) or Download Image (false) chosen over a
+    /// picture that is also a link, done as the image menu does them.
+    var onImageItem: ((Tab, URL, Bool) -> Void)?
     /// Where the last image right-clicked came from (see ImageMenu.swift).
     var imageFrame: WKFrameInfo? { images.frame }
     var searchName: (() -> String?)?
@@ -848,7 +851,13 @@ final class Tab: ObservableObject, Identifiable {
         self.shy = shy
         self.bench = bench
         self.configuration = configuration ?? Web.configuration(shy: shy)
+        if Store.testing { Tab.live.add(self) }
     }
+
+    /// Every tab still in memory, on a test run, for the bench's `alive`
+    /// (Tests/memory_close.py): a tab closed and still counted here is
+    /// held by something, and so may be its page.
+    static let live = NSHashTable<Tab>.weakObjects()
 
     private func build() -> PageView {
         // Here rather than in Web.configuration: a tab's configuration is
@@ -875,6 +884,10 @@ final class Tab: ObservableObject, Identifiable {
         web.searchName = { [weak self] in self?.searchName?() }
         web.translating = { [weak self] in self.map { $0.translator != nil && $0.translation?.failed != true } ?? false }
         web.onTranslate = { [weak self] in self?.toggleTranslation() }
+        web.onImage = { [weak self] url, copy in
+            guard let self else { return }
+            self.onImageItem?(self, url, copy)
+        }
         web.onSearch = { [weak self] text in
             guard let self else { return }
             self.onSearch?(self, text)
@@ -917,7 +930,8 @@ final class Tab: ObservableObject, Identifiable {
         PopupGestureRelay.install(on: controller)
         Shield.shared.protect(controller)
         built = web
-        // A tab muted before it went to sleep wakes muted.
+        // Set before loadAndVerify gives this view a page: a tab restored or
+        // woken muted must not make its first sound while that page boots.
         if muted { Muter.set(true, on: web) }
         arm(hiding: veils)
 
@@ -1846,6 +1860,7 @@ final class Tab: ObservableObject, Identifiable {
         web.searchName = nil
         web.translating = nil
         web.onTranslate = nil
+        web.onImage = nil
         web.onSearch = nil
         web.stopLoading()
         // Detaching a view doesn't end capture while something still holds it.
@@ -2051,6 +2066,21 @@ final class PageView: WKWebView {
                 front.action = #selector(openLinkInFront(_:))
                 menu.insertItem(front, at: index + 1)
             }
+            // With Split View on, the link beside this page instead, the two
+            // as a pair. A copy of WebKit's item, for what WebKit reads off
+            // it when the action reaches it.
+            if Shared.prefs.splitView, let beside = item.copy() as? NSMenuItem {
+                beside.title = "Open Link in Split View"
+                beside.identifier = NSUserInterfaceItemIdentifier("SearchOpenLinkInSplitView")
+                beside.keyEquivalentModifierMask = []
+                beside.isAlternate = false
+                beside.target = self
+                beside.action = #selector(openLinkBeside(_:))
+                // After Open Link in New Tab and the item ⌥ turns it into.
+                var at = index + 1
+                while at < menu.items.count, menu.items[at].isAlternate { at += 1 }
+                menu.insertItem(beside, at: at)
+            }
             openLink = (item.target, item.action)
             item.title = "Open Link in New Tab"
             item.keyEquivalentModifierMask = []
@@ -2077,6 +2107,20 @@ final class PageView: WKWebView {
             clean.target = self
             clean.representedObject = url
             menu.insertItem(clean, at: index + 1)
+        }
+        // A picture that is also a link keeps this menu (ImageRelay), and
+        // with it WebKit's Copy Image and Download Image, which on some sites
+        // do nothing: this app's own do them instead, as its picture menu
+        // does. Told of the picture just before this menu, for this menu only.
+        if let image = keptImage {
+            keptImage = nil
+            for (id, action) in [("WKMenuItemIdentifierCopyImage", #selector(copyImage(_:))),
+                                 ("WKMenuItemIdentifierDownloadImage", #selector(downloadImage(_:)))] {
+                guard let item = menu.items.first(where: { $0.identifier?.rawValue == id }) else { continue }
+                item.target = self
+                item.action = action
+                item.representedObject = image
+            }
         }
         // The bench's linkmenu: the item it names is chosen as the menu
         // comes up, the way a hand would choose it, and the menu goes.
@@ -2214,6 +2258,36 @@ final class PageView: WKWebView {
         CleanLink.copy(url)
     }
 
+    /// The picture under the right-click, when this menu is WebKit's over
+    /// one (see ImageRelay), or nil.
+    var keptImage: URL?
+    /// Copy Image (true) or Download Image (false), this app's own.
+    var onImage: ((URL, Bool) -> Void)?
+
+    @objc private func copyImage(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { onImage?(url, true) }
+    }
+
+    @objc private func downloadImage(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { onImage?(url, false) }
+    }
+
+    /// Open Link in Split View: the same action, the tab it makes marked to
+    /// go beside this page, for a second, as the one behind is.
+    private var besideSince: Date?
+
+    @objc private func openLinkBeside(_ item: NSMenuItem) {
+        guard let action = openLink.action else { return }
+        besideSince = Date()
+        NSApp.sendAction(action, to: openLink.target, from: item)
+    }
+
+    /// Whether the tab being made now is the menu's, to go beside this page.
+    func takeBeside() -> Bool {
+        defer { besideSince = nil }
+        return besideSince.map { Date().timeIntervalSince($0) < 1 } ?? false
+    }
+
     @objc private func searchSelection(_ item: NSMenuItem) {
         defer { selection = nil }
         guard let selection, !selection.isEmpty else {
@@ -2254,8 +2328,141 @@ final class PageView: WKWebView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // A press that reaches the page under a peek is a press beside the
+        // panel, which puts the peek away (see Peek.swift); under the column
+        // it is nobody's.
+        if underCover(event) {
+            if let browser, browser.peekTab != nil, browser.peekTab?.built !== self { browser.closePeek() }
+            return
+        }
         onTouch?()
         super.mouseDown(with: event)
+    }
+
+    // MARK: - a paused video filling the screen
+
+    /// A video filling the screen and paused gets VisionKit's view laid over
+    /// the whole page, a moment later: WebKit has looked into the frame on
+    /// screen for text and a subject to lift (VKCImageAnalysisOverlayView).
+    /// It has click recognizers of its own, and the one for a single click
+    /// took every click, text under it or not: AppKit held the press back
+    /// while it decided, the recognizer said yes, and the press never reached
+    /// the page. The click that paused a YouTube video was the last the page
+    /// heard: neither the video nor its play button played it again, only
+    /// the space bar did. Hidden, it is out of the way of the clicks, and
+    /// WebKit takes it away itself once the video plays. WebKit's switch
+    /// for it (TextRecognitionInVideosEnabled) can't be turned off instead:
+    /// the page's process asks all the same, and WebKit ends a process that
+    /// asks for what is switched off, so the video's page crashed.
+    private weak var hiddenAnalysis: NSView?
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        guard NSStringFromClass(type(of: subview)).hasPrefix("VKCImageAnalysisOverlayView") else { return }
+        if fullscreenState != .notInFullscreen {
+            subview.isHidden = true
+            hiddenAnalysis = subview
+        } else if subview === hiddenAnalysis {
+            // The same view, back over a picture in the page: as WebKit has it.
+            subview.isHidden = false
+            hiddenAnalysis = nil
+        }
+    }
+
+    // MARK: - under the column or a peek
+
+    /// The pointer is over the page, but under something of the window's
+    /// lying on it: the column out over the page while it is folded, or a
+    /// peek and the dimming round it (Browser.covers). The window gives a
+    /// click there to what is on top, but the page's own tracking area hears
+    /// every move under it all the same — AppKit tracks by rectangle, not by
+    /// what is in front — so WebKit went on lighting up links, opening menus
+    /// that open on hover, showing their tooltips and turning the pointer
+    /// into a hand or a caret over the column and the dimmed page (idea 418).
+    /// Under cover the page is told once that the pointer has gone, and
+    /// hears nothing more of it until it is back.
+    private(set) var covered = false
+
+    /// The browser of the window the page is in.
+    private var browser: Browser? {
+        guard let window else { return nil }
+        return Browsers.all.first { $0.window === window }
+    }
+
+    /// Whether the event is under cover, and if so, the page told so.
+    private func underCover(_ event: NSEvent) -> Bool {
+        guard let window, event.window == nil || event.window === window,
+              browser?.covers(self, at: event.locationInWindow) == true
+        else {
+            covered = false
+            return false
+        }
+        guard !covered else { return true }
+        covered = true
+        // WebKit reads a pointer leaving as one more move, where it left:
+        // told it left from far outside the page, nothing in the page is
+        // under it any more, and the pointer goes back to an arrow.
+        if let gone = NSEvent.enterExitEvent(
+            with: .mouseExited, location: NSPoint(x: -10_000, y: -10_000), modifierFlags: [],
+            timestamp: event.timestamp, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, trackingNumber: 0, userData: nil
+        ) {
+            super.mouseExited(with: gone)
+        }
+        NSCursor.arrow.set()
+        return true
+    }
+
+    /// Whether a move, an entry or a cursor update for the page is to go
+    /// through: not under cover (see PointerGate).
+    func hears(_ event: NSEvent) -> Bool { !underCover(event) }
+
+    /// WebKit's tracking areas aren't the view's: their owner is an object of
+    /// WebKit's own (WKMouseTrackingObserver) that hands each move straight
+    /// to the page, past this view's mouseMoved. Each goes behind a gate of
+    /// ours with the same rectangle and options, which asks the page first.
+    private var gates: [PointerGate] = []
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        gateTrackingAreas()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        gateTrackingAreas()
+    }
+
+    func gateTrackingAreas() {
+        for area in trackingAreas {
+            guard let owner = area.owner, owner !== self, !(owner is PointerGate) else { continue }
+            let gate = PointerGate(page: self, target: owner as AnyObject)
+            removeTrackingArea(area)
+            // One WebKit has made again replaces our gate for the old one.
+            for old in trackingAreas where old.options == area.options && (old.owner as? PointerGate)?.target === owner {
+                removeTrackingArea(old)
+            }
+            addTrackingArea(NSTrackingArea(rect: area.rect, options: area.options, owner: gate, userInfo: area.userInfo))
+            gates.append(gate)
+        }
+        // Gates whose area WebKit has since taken away go too.
+        let live = Set(trackingAreas.compactMap { $0.owner as? PointerGate }.map(ObjectIdentifier.init))
+        gates.removeAll { !live.contains(ObjectIdentifier($0)) }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if underCover(event) { return }
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if underCover(event) { return }
+        super.mouseEntered(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if underCover(event) { return }
+        super.rightMouseDown(with: event)
     }
 
     /// The side buttons a mouse has for back and forward — button 3 and 4.
@@ -2264,6 +2471,7 @@ final class PageView: WKWebView {
     /// drivers settled on regardless, so it's what a mouse's own firmware
     /// is tuned to send.
     override func otherMouseDown(with event: NSEvent) {
+        if underCover(event) { return }
         switch event.buttonNumber {
         case 3 where canGoBack: goBack()
         case 4 where canGoForward: goForward()
@@ -2704,6 +2912,34 @@ final class PageView: WKWebView {
         onPull?(pull)
     }
 
+}
+
+/// The owner of one of a page's tracking areas in place of WebKit's own:
+/// it hands WebKit's object each move, entry and cursor update the page
+/// hears, and keeps back those under a peek or the column (idea 418).
+/// Leaving always goes through, so nothing stays lit up.
+final class PointerGate: NSResponder {
+    private weak var page: PageView?
+    private(set) weak var target: AnyObject?
+
+    init(page: PageView, target: AnyObject) {
+        self.page = page
+        self.target = target
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private func pass(_ selector: Selector, _ event: NSEvent, always: Bool = false) {
+        guard let target, target.responds(to: selector) else { return }
+        if !always, let page, !page.hears(event) { return }
+        _ = target.perform(selector, with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) { pass(#selector(NSResponder.mouseMoved(with:)), event) }
+    override func mouseEntered(with event: NSEvent) { pass(#selector(NSResponder.mouseEntered(with:)), event) }
+    override func cursorUpdate(with event: NSEvent) { pass(#selector(NSResponder.cursorUpdate(with:)), event) }
+    override func mouseExited(with event: NSEvent) { pass(#selector(NSResponder.mouseExited(with:)), event, always: true) }
 }
 
 /// Carries the page's scroll position back to its tab.

@@ -439,9 +439,9 @@ extension Browser {
         }
     }
 
-    func openInternal(_ url: URL, foreground: Bool, from source: Tab?, mayWait: Bool = false) {
+    func openInternal(_ url: URL, foreground: Bool, from source: Tab?, mayWait: Bool = false, link: Bool = false) {
         let current = { [weak self, weak source] in
-            self?.open(url, foreground: foreground, from: source, mayWait: mayWait)
+            self?.open(url, foreground: foreground, from: source, mayWait: mayWait, link: link)
             return ()
         }
         if !routeInternal(url, from: source, foreground: foreground, current: current) { current() }

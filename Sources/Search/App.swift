@@ -89,6 +89,9 @@ struct SearchApp: App {
                 Button("Share…") { browser.share() }
                     .shortcut("file.share")
                     .disabled(!(browser.active?.isWeb ?? false))
+                Button("Save Page As…") { browser.savePage() }
+                    .shortcut("file.savePage")
+                    .disabled(!(browser.active?.isWeb ?? false))
                 Button("Export as PDF…") { browser.exportPDF() }
                     .shortcut("file.exportPDF")
                     .disabled(!(browser.active?.isWeb ?? false))
@@ -333,11 +336,11 @@ struct SearchApp: App {
                 }
                 if !browser.ghosts.isEmpty {
                     Section("Recently Closed") {
-                        ForEach(browser.ghosts.reversed().prefix(10)) { ghost in
+                        ForEach(browser.recentlyClosed.prefix(10)) { ghost in
                             Button {
                                 browser.reopen(ghost)
                             } label: {
-                                MenuLine(title: ghost.label, url: ghost.url)
+                                MenuLine(title: browser.closedTitle(for: ghost), url: ghost.url)
                             }
                         }
                     }
@@ -348,7 +351,7 @@ struct SearchApp: App {
                 Button("Downloads…") { browser.hoarding = true }
                     .shortcut("history.downloads")
                 Divider()
-                Button("Clear Browsing Data…") { browser.recallMode = .clearing }
+                Button("Clear Browsing Data…") { browser.clearBrowsingData() }
                     .shortcut("history.clearData")
                 Button("Clear History") { browser.clearHistory() }
                     .shortcut("history.clear")
@@ -715,14 +718,13 @@ struct ContentView: View {
         // SplitStage owns the field whenever Split View is enabled, including
         // an ordinary tab that is not currently paired. Drawing it here too
         // leaves two offset address fields on a blank tab.
-        if browser.fieldShowing, !browser.prefs.splitView {
+        if !browser.prefs.splitView {
             Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
                 // Centred on the page, not on the window. The column of tabs
                 // is not what the field is standing over, and dimming it along
                 // with the page says otherwise.
                 .padding(.leading, sidebar && !sideOnRight ? browser.prefs.columnWidth : 0)
                 .padding(.trailing, sidebar && sideOnRight ? browser.prefs.columnWidth : 0)
-                .transition(.scale(scale: 0.97).combined(with: .opacity))
         }
     }
 
@@ -1107,7 +1109,15 @@ struct ContentView: View {
                   let content = window.contentView,
                   let frame = content.superview
             else { return }
-            frame.addSubview(container, positioned: .above, relativeTo: content)
+            // Full screen keeps the title bar in a window of its own (see
+            // Lights.place); a window put back in full screen at launch, or
+            // opened from one, has it there already. Taken back into this
+            // window, its buttons showed at the window's foot, out of reach.
+            // Full screen ending puts it back above the content view itself,
+            // its zPosition kept.
+            if container.superview === frame {
+                frame.addSubview(container, positioned: .above, relativeTo: content)
+            }
             container.wantsLayer = true
             container.layer?.zPosition = 10
         }
@@ -1557,7 +1567,7 @@ struct ContentView: View {
 
         // Keep the clearing controls reachable from a focused page editor.
         if shifted, event.keyCode == 51 {
-            browser.recallMode = .clearing
+            browser.clearBrowsingData()
             return true
         }
 
