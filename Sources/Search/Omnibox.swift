@@ -90,10 +90,15 @@ struct Omnibox: View {
             if let app = browser.appAhead {
                 AppLinkBadge(link: app)
                     .transition(.scale(scale: 0.9, anchor: .trailing).combined(with: .opacity))
+            } else if let route = browser.routeAhead {
+                // An app takes the address before routing does (submit).
+                RouteBadge(route: route)
+                    .transition(.scale(scale: 0.9, anchor: .trailing).combined(with: .opacity))
             }
         }
             .animation(Motion.quick, value: browser.siteChip)
             .animation(Motion.quick, value: browser.appAhead?.id)
+            .animation(Motion.quick, value: browser.routeAhead)
             .frame(height: 22)
             .padding(.horizontal, 22)
             .padding(.vertical, 14)

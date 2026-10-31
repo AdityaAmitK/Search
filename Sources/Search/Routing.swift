@@ -447,3 +447,62 @@ extension Browser {
         if !routeInternal(url, from: source, foreground: foreground, current: current) { current() }
     }
 }
+
+/// Where a routing rule sends what Return would open, when that is not
+/// here: its Space, or a question for an Ask rule.
+struct RouteAhead: Equatable {
+    let space: Space?
+    let label: String
+    let asks: Bool
+}
+
+extension Browser {
+    /// The rule's destination for the address Return would open, as
+    /// routeInternal would answer it: nil where the link stays here.
+    var routeAhead: RouteAhead? {
+        guard active?.shy != true, let url = addressAhead,
+              let rule = Routing.shared.config.match(url) else { return nil }
+        let policy = Routing.shared.config.policy(for: rule)
+        guard policy != .current else { return nil }
+        let profile = rule.destinationProfile
+        // This window's own Spaces are at hand; another profile's are read.
+        let space = (profile == profileID ? spaces : Spaces.read(profile: profile))
+            .first { $0.id == rule.spaceID && $0.profileID == profile }
+        if policy == .destination, space == nil || space?.id == spaceID { return nil }
+        guard policy == .destination, let space else { return RouteAhead(space: nil, label: "Asks where", asks: true) }
+        let label = Profiles.shared.several ? "\(Profiles.shared.profile(profile).name) → \(space.name)" : space.name
+        return RouteAhead(space: space, label: label, asks: false)
+    }
+}
+
+/// Beside the address: the profile and Space a rule opens it in.
+struct RouteBadge: View {
+    let route: RouteAhead
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Group {
+                if let space = route.space {
+                    SpaceIcon(symbol: space.symbol, picture: space.picture, size: 13)
+                } else {
+                    Image(systemName: "questionmark.circle")
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Palette.muted)
+            .frame(width: 16, height: 16)
+            Text(route.label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 22)
+        .background(Palette.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .help(route.asks ? "Return asks where to open this (Settings → Routing)."
+                         : "Return opens this in \(route.label) (Settings → Routing).")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(route.asks ? "Asks where to open" : "Opens in \(route.label)")
+    }
+}

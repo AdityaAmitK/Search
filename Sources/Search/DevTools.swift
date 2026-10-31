@@ -31,40 +31,60 @@ enum DevTools {
         return web.perform(get)?.takeUnretainedValue() as? NSObject
     }
 
-    /// Puts the tools into the page's inspector once its page is ready, and
-    /// shows `panel` if one is named. Asked again, an inspector that already
-    /// has them only shows the panel.
+    /// The tools as the inspector's page runs them: they wait in the page
+    /// for the inspector to connect to the one it inspects, about ten
+    /// seconds at most, then start, once per page.
+    private static let bootstrap: String? = script.map { script in
+        """
+        (function sdtBoot(tries) {
+            if (window.SearchDevTools) return;
+            var target = typeof WI !== 'undefined' && (WI.pageTarget || WI.mainTarget);
+            if (!target || !target.DOMAgent || typeof InspectorFrontendAPI === 'undefined') {
+                if (tries < 200) setTimeout(function () { sdtBoot(tries + 1); }, 50);
+                return;
+            }
+        \(script)
+        })(0);
+        true;
+        """
+    }
+
+    /// Puts the tools into the page's inspector, and shows `panel` if one is
+    /// named. Asked again, an inspector that already has them only shows the
+    /// panel.
     static func mount(_ web: WKWebView, panel: String? = nil) {
-        guard script != nil, let inspector = inspector(of: web) else { return }
+        guard bootstrap != nil, let inspector = inspector(of: web) else { return }
         attempt(inspector, panel: panel, tries: 0)
     }
 
     private static func attempt(_ inspector: NSObject, panel: String?, tries: Int) {
-        // About five seconds for WebKit to make the inspector's page and for
-        // that page to connect to the one it inspects.
-        guard tries < 100, let script else { return }
+        // About five seconds for WebKit to make the inspector's page.
+        guard tries < 100, let bootstrap else { return }
         let retry = {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { attempt(inspector, panel: panel, tries: tries + 1) }
         }
+        // A closed inspector's page can still be handed back for a moment,
+        // out of any window: the one to use is the one on screen.
         let get = NSSelectorFromString("inspectorWebView")
         guard inspector.responds(to: get),
-              let front = inspector.perform(get)?.takeUnretainedValue() as? WKWebView
+              let front = inspector.perform(get)?.takeUnretainedValue() as? WKWebView,
+              front.window != nil
         else { return retry() }
-        let ready = "typeof WI !== 'undefined' && !!(WI.pageTarget || WI.mainTarget) && !!(WI.pageTarget || WI.mainTarget).DOMAgent && typeof InspectorFrontendAPI !== 'undefined' ? (window.SearchDevTools ? 'mounted' : 'ready') : 'waiting'"
-        front.evaluateJavaScript(ready) { state, _ in
-            switch state as? String {
-            case "ready":
-                front.evaluateJavaScript(script) { _, _ in show(panel, in: front) }
-            case "mounted":
-                show(panel, in: front)
-            default:
-                retry()
-            }
+        // Opened again, the inspector loads its page again, sometimes just
+        // after this runs on the old one, which still has the tools: once
+        // they had been put in by hand, the second opening showed WebKit's
+        // own UI. Every load of its page now gets them.
+        let scripts = front.configuration.userContentController
+        if !scripts.userScripts.contains(where: { $0.source == bootstrap }) {
+            scripts.addUserScript(WKUserScript(source: bootstrap, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         }
-    }
-
-    private static func show(_ panel: String?, in front: WKWebView) {
-        guard let panel, panel.allSatisfy(\.isLetter) else { return }
-        front.evaluateJavaScript("window.SearchDevTools && SearchDevTools.show('\(panel)'); true", completionHandler: nil)
+        // The panel asked for is the one the tools open on, by the page there
+        // now or by one loaded a moment later.
+        var run = bootstrap
+        if let panel, panel.allSatisfy(\.isLetter) {
+            run = "try { localStorage.setItem('sdt.panel', JSON.stringify('\(panel)')); } catch {}\n" + run
+                + "\nwindow.SearchDevTools && SearchDevTools.show('\(panel)'); true;"
+        }
+        front.evaluateJavaScript(run, completionHandler: nil)
     }
 }

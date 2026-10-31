@@ -66,15 +66,22 @@ for policy in [InternalRoutingOverride.current, .ask, .destination] {
     overrides.rules[0].internalPolicy = policy
     assert(overrides.policy(for: overrides.rules[0]).rawValue == policy.rawValue)
     let roundTrip = try JSONDecoder().decode(RoutingConfig.self, from: JSONEncoder().encode(overrides))
-    assert(roundTrip == overrides)
+    // Reading a rule pins its destination profile: none saved means Personal.
+    var expected = overrides
+    expected.rules[0].destinationProfileID = expected.rules[0].destinationProfile
+    assert(roundTrip == expected)
+    assert(roundTrip.rules[0].destinationProfileID == Profile.personalID)
 }
 print("Swift routing policy: matching, specificity, validation, toggles, identity and saved-empty checks passed")
 '''
 links = (checkout / 'Sources/Search/Links.swift').read_text()
-assert 'guard prepareExternal(url, in: browser) else { return }' in links
-assert 'if let browser, prepareExternal(first, in: browser) { browser.arrive(first) }' in links
-assert 'guard let browser, prepareExternal(url, in: browser) else { return }' in links
+# External links resolve their routed window before a tab is made, and land there.
+assert 'guard let target = prepareExternal(url, in: browser) else { return }\n            target.arrive(url)' in links
+assert 'if let browser, let target = prepareExternal(first, in: browser) { target.arrive(first) }' in links
+assert 'guard let browser, let target = prepareExternal(url, in: browser, foreground: false) else { return }\n                    target.open(url' in links
 with tempfile.TemporaryDirectory() as folder:
     path = Path(folder) / 'policy.swift'
-    path.write_text('import Foundation\n' + policy + harness)
+    # The rules name destination profiles; the policy needs only Personal's id.
+    stub = 'enum Profile { static let personalID = UUID() }\n'
+    path.write_text('import Foundation\n' + stub + policy + harness)
     subprocess.run(['swift', str(path)], check=True)
